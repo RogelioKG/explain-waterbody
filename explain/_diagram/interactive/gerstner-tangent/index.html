@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>N 隨坡度傾斜，波峰處 T 變短</title>
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <header class="top">
+    <p class="concl"><span class="k-n">N</span> 隨坡度傾斜，波峰處 <span class="k-t">T</span> 變短</p>
+    <div class="tools">
+      <button id="reset" type="button" aria-label="重設視角">重設視角</button>
+    </div>
+  </header>
+  <main class="stage card">
+    <div class="plot"><canvas id="cv" tabindex="0" aria-label="3D Gerstner 波水面，波長 6 m、陡度 0.5，沿 +x 前進；水面上一點有 T、B 兩支切線箭頭與 N = B × T 箭頭，N 與 T、B 之間各有直角記號；拖曳或用方向鍵旋轉視角"></canvas></div>
+  </main>
+  <section class="ctl card" aria-label="波上的位置">
+    <label class="name" for="f"><span class="dot" style="--tone: var(--water)"></span>φ</label>
+    <output id="fv" for="f"></output>
+    <div class="rail">
+      <input id="f" type="range" min="0" max="360" step="3" value="0" style="--tone: var(--water)" aria-label="那一點在波上的位置 φ，從 0 到 2π" />
+      <button class="tick" id="tA" type="button" aria-pressed="true" aria-label="甲，φ = 0">甲</button>
+      <button class="tick" id="tB" type="button" aria-pressed="false" aria-label="乙，φ = π/2">乙</button>
+    </div>
+  </section>
+  <script src="./script.js"></script>
+</body>
+</html>

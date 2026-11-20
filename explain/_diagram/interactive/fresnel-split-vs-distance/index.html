@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>看多遠，反射和透過各佔多少</title>
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <h1 class="entry">約 10 公尺外，水面才<span class="k-sky">像鏡子</span></h1>
+
+  <main class="stage card">
+    <div class="plot"><canvas id="cv" role="img" aria-label="側視圖與比例圖"></canvas></div>
+    <div class="slider"><input type="range" id="in-l" aria-label="看多遠 ℓ" min="0" max="30" step="0.5" value="10" /></div>
+    <div class="ctl">
+      <label for="in-l">看多遠 ℓ</label><output id="o-l" for="in-l"></output>
+      <span class="cap">側視等比例，線寬 = 比例</span>
+    </div>
+  </main>
+
+  <script src="./script.js"></script>
+</body>
+</html>

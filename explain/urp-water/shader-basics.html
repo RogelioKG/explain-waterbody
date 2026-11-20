@@ -1,0 +1,327 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shader Basics</title>
+<script src="../_explainer/explainer.js"></script>
+</head>
+<body>
+<script type="text/markdown" id="ex-content">
+## 這一章要做什麼
+
+### 先說明
+
+這一章沒有 Unity 操作。
+
+### 要追的這一幀
+
+畫面上的一幀是一格一格的像素：1920 × 1080 的畫面有 2,073,600 個像素，每一幀都要替每個像素決定一個顏色。決定顏色的是 GPU，它跑的小程式叫 [[shader]]。做水就是寫 shader：讓水面起伏，決定水在每個像素上是什麼顏色、透出多少後面的東西。
+
+這一章全程看同一幀：攝影機站在湖岸上看著湖，畫面裡有湖底、一顆半泡在水裡的石頭和水面，上方是天空。水面是一片 60 公尺見方、切成 200 × 200 格的 [[mesh]] (網格：由頂點和三角形組成的模型形狀)，平放在 $y = 0$；湖底最深處在 $y = -5$。
+
+<ex-fig of="lake-frame-scene-section" at="1" caption="這一幀的場景，從側面看 (示意，垂直方向放大)" />
+
+跟著這一幀回答兩個問題：
+
+- 水面上的一個三角形，怎麼從 mesh 裡的幾筆數字變成畫面上的像素？
+- 湖底、石頭、天空、水面，誰先畫、誰後畫？為什麼水一定要最後畫？
+
+## 追一個三角形：從 vertex 到像素
+
+### 整條路線
+
+<ex-fig of="triangle-render-pipeline" caption="一個三角形從 mesh 走到畫面經過的六站" />
+
+六站裡有兩站是你寫的程式：[[vertex shader]] 和 [[fragment shader]]。在 Shader Graph 裡，它們就是 Vertex 和 Fragment 兩區。其他各站由 GPU 自己完成，你只能用設定影響它們。圖上最後的虛線框「寫進像素」不算在六站內，要看整幀的順序，下一大段再講。
+
+### 1 vertex data：mesh 裡的三個 vertex
+
+[[mesh]] 由兩樣東西組成：
+
+- **vertex** (頂點：mesh 上的角點，存著位置、normal、UV 等資料)：每個 vertex 帶著幾筆資料。這片水面的 vertex 有 Position (vertex 的位置)、Normal ([[normal]]，法線：垂直於表面、朝外的方向) 和 [[UV]] (貼圖座標：vertex 在 texture 上對應的位置；texture 即貼圖，是存著顏色或資料的圖片，後面會講)。200 × 200 格要 201 × 201 = 40,401 個 vertex。
+- **三角形**：每個三角形依序記下 3 個 vertex index (頂點編號)。每格切成兩個三角形，共 80,000 個。
+
+Position 是 mesh 自己的座標 ([[object space]]，物件空間，也叫 local 座標，之後都稱 object space)：原點在 mesh 中心，$x$、$z$ 在水平面上，$y$ 向上，單位公尺。順帶先說好：這片水面的 GameObject (物件：Scene 裡的東西) 擺在世界原點、Rotation 為 0、Scale 為 1，所以它的 object space 座標恰好等於 world position (世界座標，在 [[world space]] 裡：整個場景共用的座標系)。
+
+我們追的三角形在離岸約 1 公尺的水面上，mesh 裡依序記成 4120、4321、4121。以 mesh 中心為原點，$x$、$z$ 的範圍都是 −30 到 30 公尺；vertex 從左下角一列一列編號，每列 201 個，列和個數都從 0 數起：
+
+<ex-fig of="water-mesh-object-space-grid" caption="60 m 見方的水面，object space 座標 (格線只畫示意，實際 200 × 200 格)，與放大的那一格" />
+
+4120 是第 20 列第 100 個：20 × 201 + 100 = 4120。每格 0.3 公尺，所以它的 $x = -30 + 100 \times 0.3 = 0$，$z = -30 + 20 \times 0.3 = -24$。4321 在它上面一列 (多 201)，4121 在它右邊一個 (多 1)：
+
+| vertex index | Position $(x, y, z)$ | Normal | UV |
+| --- | --- | --- | --- |
+| 4120 | (0, 0, −24) | (0, 1, 0) | (0.5, 0.1) |
+| 4321 | (0, 0, −23.7) | (0, 1, 0) | (0.5, 0.105) |
+| 4121 | (0.3, 0, −24) | (0, 1, 0) | (0.505, 0.1) |
+
+相鄰 vertex 相距 60 ÷ 200 = 0.3 公尺。mesh 是平的，所有 vertex 的 $y$ 都是 0，normal 都朝正上方。
+
+### 2 vertex shader：每個 vertex 各跑一次
+
+vertex shader 對每個 vertex 各跑一次，彼此獨立：處理 4120 時看不到 4321。
+
+它一定要交出的是每個 vertex 經攝影機換算後的座標，叫 [[clip space]] 座標：GPU 要靠它決定三角形畫在畫面的哪裡。它還不是畫面上的位置，是給 GPU 的一組座標，GPU 之後自己換成畫面上的位置。算它要用攝影機的位置、朝向、Field of View (視野)，這一章把這一段當成黑盒子。
+
+在 Shader Graph 裡，你只動前半：Vertex 區的 Position block (就是上面那筆 Position 資料) 收的是 object space 座標，你在這裡改 vertex；同一區還有 Normal block，可以改 normal。後半的攝影機換算，由 Unity 產生的程式碼自動接在 Position block 之後。順序是先改位置，再換算。
+
+水面的起伏就做在 Position block：先把 vertex 的 $y$ 改掉。假設這一幀的波浪把三個 vertex 分別抬到 $y = 0.30$、0.10、0.20 公尺 (示意值)。mesh 裡存的資料沒有變，下一幀 vertex shader 又從平的 mesh 重新算一次。
+
+<ex-fig of="vertex-shader-three-vertices" caption="三個 vertex 各跑一次 vertex shader：你改 y，Unity 接上換算，交出 clip space 座標 (示意：右邊每一格代表一個像素，比實際放大很多)" />
+
+三個 vertex 的 clip space 座標交出去之後，GPU 自己換成它們在畫面上的位置，三角形的三個角就定位了。
+
+### 3 culling：正面還是背面
+
+三角形有兩面。GPU 看三個 vertex 在畫面上的順序判斷看到的是哪一面：Unity 規定，從攝影機看過去，照三角形記下的順序 (4120 → 4321 → 4121，不是編號大小) 走一圈是順時針的，就是正面；逆時針就是背面。同樣三個 vertex 若記成 4120 → 4121 → 4321，從上方看就是逆時針，變成背面。預設只畫正面，背面不畫，叫做 [[culling]] (剔除：不畫某些三角形或物體)。像石頭這種封閉的物體，背面一定被自己的正面擋住，不畫也看不出差別，還省下工作。
+
+這片水面的三角形都排成「從上方看是順時針」。攝影機在岸上往下看，看到的是正面，三角形留下來繼續走。
+
+<ex-fig of="triangle-winding-backface-cull" caption="同一個三角形，從上方看與從下方看" />
+
+潛到水下往上看，同一個三角形變成逆時針，是背面，會被 cull：從水下看不到水面。要兩面都畫，在 Shader Graph 的 Graph Settings 把 Render Face 從預設的 Front 改成 Both；這時 fragment shader 可以用 Is Front Face node (節點：Shader Graph 裡的一個運算方塊) 分辨正在畫哪一面，讓水面從下方看起來不一樣。
+
+### 4 rasterization：找出蓋住哪些像素
+
+三角形三個角在畫面上的位置確定之後，GPU 找出中心點落在三角形裡的像素，這一步叫 [[rasterization]] (光柵化：找出三角形蓋住哪些像素)。每個被蓋住的像素產生一個 [[fragment]]：這個三角形在這個像素上的一份候選結果。說是候選，是因為同一個像素上可能還有別的東西，最後誰留下要看整幀的順序。
+
+<ex-fig of="triangle-pixel-coverage" caption="畫面是一格一格的像素：中心點落在三角形裡的格才產生 fragment (示意：每一格代表一個像素，比實際放大很多)" />
+
+### 5 interpolation：三角形內部的值從哪來
+
+vertex shader 只算了三個 vertex，fragment 卻遍布整個三角形。fragment 需要的高度、UV、normal，由三個 vertex 的值依 weight (比重：每個 vertex 占多少) 算出來，叫做 [[interpolation]] (插值)：
+
+$$v = w_0 v_0 + w_1 v_1 + w_2 v_2,\qquad w_0 + w_1 + w_2 = 1$$
+
+$v_0$、$v_1$、$v_2$ 是三個 vertex 的值，$w_0$、$w_1$、$w_2$ 是 weight，由 fragment 在三角形裡的位置決定：越靠近哪個 vertex，那個 vertex 的 weight 越大；剛好在某個 vertex 上時，那個 vertex 的 weight 是 1，另外兩個是 0。
+
+圖中圈起來的 fragment，weight 是 0.5 (4120)、0.25 (4321)、0.25 (4121)：
+
+<ex-fig of="fragment-barycentric-interpolation" at="3" caption="這個 fragment 的值，由三個 vertex 以 0.5、0.25、0.25 的 weight 算出" />
+
+| 資料 | 4120 (× 0.5) | 4321 (× 0.25) | 4121 (× 0.25) | 這個 fragment |
+| --- | --- | --- | --- | --- |
+| 高度 $y$ | 0.30 | 0.10 | 0.20 | 0.15 + 0.025 + 0.05 = 0.225 |
+| UV | (0.5, 0.1) | (0.5, 0.105) | (0.505, 0.1) | (0.50125, 0.10125) |
+
+vertex shader 交出來的每一筆資料，GPU 都會自動這樣 interpolate。
+
+### mesh 太疏時，波浪會有稜角
+
+weight 隨位置均勻 (線性) 變化，所以兩個 vertex 之間只能是一條直線，三角形內部是一個平面。波浪只能在 vertex 上轉折，vertex 之間的起伏做不出來。
+
+<ex-fig of="mesh-cell-size-wave-loss" caption="波長 6 m 的波，mesh 每格 1.5 m 與 0.3 m 時做得出來的形狀。虛線是想要的波，實線是 mesh 實際的形狀，黃色是 mesh 做不出來的部分" />
+
+每格 1.5 公尺 (60 公尺切 40 格) 時，一個波長只有 4 段，波峰和波谷都是尖角；每格 0.3 公尺 (切 200 格) 時有 20 段，看起來已經是平滑的曲線。波長越短，mesh 就要越密。
+
+### 6 fragment shader：每個 fragment 跑一次
+
+fragment shader 對每個 fragment 各跑一次，輸入是 interpolation 後的資料，輸出是這個 fragment 的顏色，以及透明度 [[alpha]] (0 是完全透明，1 是完全不透明)。水是什麼顏色、多亮、透出多少後面的東西，都在這一站決定。
+
+兩種 shader 跑的次數差很多：vertex shader 每幀跑約 4 萬次，每個 vertex 一次；水面佔 1920 × 1080 畫面的一半時，fragment shader 跑約 104 萬次。所以大的形狀 (波浪的起伏) 做在 vertex 上；每個像素都不一樣的細節，做在 fragment 上，靠的是 texture。
+
+## fragment 的顏色從哪裡來
+
+### UV：texture 上的座標
+
+[[UV]] 是每個 vertex 帶著的一組座標 $(u, v)$，指向 texture 上的位置：(0, 0) 是 texture 左下角，(1, 1) 是右上角。fragment 拿到 interpolation 後的 UV，就知道要去 texture 的哪一點取顏色，這叫 [[sampling]] (取樣：依座標到 texture 上讀一個顏色)。texture 上的一格叫 [[texel]]，和畫面上的像素分開稱呼。
+
+這片水面的 UV 是 vertex 在整片水面上的比例，一張 texture 剛好鋪滿 60 公尺。用一張 512 × 512 的 ripple texture 時，一個 texel 是 60 ÷ 512 ≈ 0.12 公尺，靠近看會糊成一片。
+
+所以通常先把 UV 乘上一個倍數再 sample。Shader Graph 的 Tiling And Offset node 做的就是 `UV × Tiling + Offset`。Tiling 設 10，texture 每 6 公尺重複一次，一個 texel 縮到約 1.2 公分。
+
+<ex-fig of="uv-tiling-water-surface" caption="同一片 60 m 的水面：UV 直接用 (左)，與乘上 Tiling 10 (右)" />
+
+我們的 fragment 的 UV 是 (0.50125, 0.10125)，乘上 10 變成 (5.0125, 1.0125)，超出了 0 到 1。texture 的 Wrap Mode 設成 Repeat 時只看小數部分，取的是 (0.0125, 0.0125)：右圖那一格的左下角附近。Offset 隨時間增加，texture 就會在水面上捲動。
+
+### 從 UV 到顏色：sample 時 GPU 怎麼取色
+
+1. fragment 的 UV 是一個點，顏色卻要塗滿一個像素
+
+   GPU 把三角形投影到畫面上，看像素的中心落在三角形的哪個位置，再 [「interpolation」](#5-interpolation：三角形內部的值從哪來)出那一點的 UV。UV 指著 texture 上的一個點，但 fragment 代表畫面上的一小塊面積。
+
+2. 最樸素的做法：點落在哪個 texel，就用它的顏色
+
+   這就是 Filter Mode 的 Point。好不好，要看一個像素的面積在 texture 上有多大。
+
+3. GPU 比較相鄰像素的 UV，就知道這塊面積多大
+
+   GPU 把像素 2 × 2 一組一起跑 fragment shader，相鄰像素的 UV 差多少，就是一個像素在 texture 上跨過多少 texel：
+
+   | 一個像素跨幾個 texel | 叫法 | 處理方式 |
+   | --- | --- | --- |
+   | 少於 1：好幾個 fragment 擠在同一個 texel 裡 | 放大 (magnification) | Bilinear (第 4 步) |
+   | 剛好 1 | 一比一 | 不需要額外處理 |
+   | 多於 1：一個 fragment 蓋住好幾個 texel | 縮小 (minification) | mipmap (第 5 步) |
+
+   這是連續的比例，不是三種分開的東西：同一片水面上，近處是放大，遠處是縮小，GPU 對每個 fragment 各自判斷。
+
+4. 放大：UV 落在 texel 中心之間，Point 會出現方塊
+
+   GPU 把 texel 的顏色當成位在它的中心點，放大時的 fragment 卻幾乎都不在中心。Point 取最近的一個，同一個 texel 範圍內的 fragment 全同色，放大後是方塊。Filter Mode 設成 Bilinear 時，改依 UV 到各個中心的距離混合，越近的比重越大 (二維時混合最近的四個 texel)。
+
+   <ex-fig of="texture-point-vs-bilinear" caption="一維的例子：黑、白兩個 texel，中心在 u = 0.125、0.375；fragment A (u = 0.2)、B (u = 0.3) 落在兩個中心之間" />
+
+   A 離黑的中心 0.075，白的比重是 $0.075 \div 0.25 = 30\%$；B 是 70%。比重一點一點變，放大後是漸層。
+
+5. 縮小：只取一點代表不了整片，用 mipmap
+
+   一個像素蓋住好幾十個 texel 時，只取其中一點，鏡頭稍微動一下，取到的點就換成旁邊的 texel，顏色可以差很多，畫面就閃爍。[[mipmap]] 是同一張 texture 預先縮小成的一組版本，每一層的長寬是上一層的一半，每一格是上一層 2 × 2 四格的平均，一層接一層，所以取到哪一點都差不多。GPU 依第 3 步的 UV 差，挑一個 texel 大約等於一個像素的那一層；圖中是第 2 層，它的一格就是 16 格的平均。
+
+   <ex-fig of="mipmap-averaging-levels" caption="左：一個像素蓋住的 4 × 4 個 texel (虛線)，格內數字是亮度 (0 黑、100 白)；右：同樣的 16 格，每次 2 × 2 取平均往下一層 (格數是示意)" />
+
+### normal map：不加 vertex 也有細小的波紋
+
+光照計算看每個 fragment 的 normal：normal 越正對著光，那一點越亮。normal 和 UV 一樣是 interpolate 出來的，平的水面上每個 fragment 的 normal 都朝正上方，整片一樣亮。
+
+湖面上幾公分大的細小波紋，靠 vertex 做不出來：mesh 要細到每格 1 公分，60 公尺的水面就要切 6000 × 6000 格。改用 [[normal map]] (法線貼圖)：一張每個 texel 存一個方向、而不是顏色的 texture。fragment shader 用 UV sample 它，拿 sample 到的方向取代 interpolation 後的 normal。mesh 仍然是平的，光影卻像表面有起伏。
+
+<ex-fig of="normal-map-lighting-flat-surface" caption="同樣的光、同樣平的水面：normal 都朝上 (左)，與 normal map 給的 normal (右)；下方色帶是每段的亮度，越正對光越亮" />
+
+texture 的每個 channel (通道：顏色的其中一個分量，例如 R) 只能存 0 到 1，方向的分量卻是 −1 到 1，所以存的時候換算過，sample 後換回來：
+
+$$n = 2c - 1$$
+
+$c$ 是 sample 到的顏色 channel，$n$ 是方向的分量。方向是相對於表面記錄的：$z$ 垂直表面朝外，$x$ 沿著 texture 的 $u$ 方向，$y$ 沿著 $v$ 方向。
+
+| sample 到的顏色 (R, G, B) | 方向 $(x, y, z)$ | 意思 |
+| --- | --- | --- |
+| (0.5, 0.5, 1) | (0, 0, 1) | 垂直表面朝外，沒有起伏 |
+| (0.85, 0.5, 0.85) | (0.7, 0, 0.7) | 朝 $u$ 方向傾斜約 45° |
+
+水面大部分地方只有小小的傾斜，大多數 texel 接近第一列的 (0.5, 0.5, 1)，所以 normal map 看起來偏藍紫色。
+
+這個方向要換成世界中的方向才能算光照，換的時候需要知道表面上的 $u$ 方向朝哪裡，由另一種 vertex data 提供：Tangent，也就是 tangent (切線：沿 texture $u$ 方向的方向)。在 Unity 裡，normal map 匯入時 Texture Type 要選 Normal map；Shader Graph 的 Sample Texture 2D node 把 Type 設成 Normal，輸出的就是換回 −1 到 1 的方向。
+
+## 一整幀：誰先畫、誰後畫
+
+### 同一個像素會被畫好幾次
+
+換一個像素看：畫面上石頭泡在水裡那一段的某個像素 $P$。從攝影機穿過 $P$ 的那條線，先碰到水面，再碰到石頭，石頭後面還有湖底。三者在 $P$ 各會產生一個 fragment。
+
+<ex-fig of="lake-frame-scene-section" at="2" caption="穿過像素 P 的線依序碰到水面、石頭、湖底 (距離是示意值)" />
+
+GPU 用 [[depth buffer]] 決定誰留下。它和畫面一樣大，每個像素記著「目前畫在這裡的東西的遠近」，每一幀開始時全部設成最遠。每個 fragment 寫進像素之前先比較，叫 [[depth test]] (深度測試)：比記錄近 (或一樣近) 就通過，寫入顏色，並把記錄改成自己的遠近；比記錄遠就丟掉。
+
+depth buffer 記的是一個代表遠近的數，不是距離本身 (它怎麼從距離換算來，[Vector Math](vector-math.html#depth-buffer-存的不是距離) 一章會講)。depth test 只拿它比誰近誰遠，所以下面的表直接寫它代表的距離：記錄寫「7 m」，意思是「7 公尺處的遠近值」。
+
+### opaque 物體：順序不影響結果
+
+每個 material 帶著一個 [[render queue]] 數字 (由 shader 預設，可在 material 上改)，每一幀 Unity 依這個數字排先後，數字小的先畫：opaque (不透明：先畫、寫深度的物體) 物體預設在 Geometry (2000)，transparent (透明：之後才畫的物體) 物體在 Transparent (3000)。湖底和石頭都是 opaque 的，先畫。同一個 queue 裡大致由近到遠排，假設石頭先畫：
+
+| 順序 | 誰 | 距離 | 和記錄比較 | 之後 $P$ 的顏色 | 之後 $P$ 的記錄 |
+| --- | --- | --- | --- | --- | --- |
+| 開始 | | | | 清空 | 最遠 |
+| 1 | 石頭 | 7 m | 比最遠近，通過 | 石頭的灰色 | 7 m |
+| 2 | 湖底 | 12 m | 比 7 m 遠，丟掉 | 石頭的灰色 | 7 m |
+
+反過來先畫湖底，湖底會先寫進去，再被更近的石頭蓋掉，結果一樣。所以 opaque 物體的先後只影響效率：由近到遠畫，被擋住的東西在比較時就丟掉，不必先寫進去再被蓋掉。
+
+### 天空：填滿剩下的像素
+
+opaque 物體全部畫完後，Unity 畫天空。天空當作在最遠處，只有記錄還是「最遠」的像素 (什麼都沒畫到的地方) 會被天空填上。$P$ 已經有石頭，不受影響。
+
+### 水：一定要最後畫
+
+水是透明的：$P$ 上應該看到透過水的石頭，也就是石頭的灰色混進水的顏色。Shader Graph 的 transparent Material 預設的混合方式 (Blending Mode = Alpha) 是：
+
+$$C = \alpha \, C_{\text{water}} + (1 - \alpha) \, C_{\text{behind}}$$
+
+$C_{\text{water}}$ 是水的顏色，$C_{\text{behind}}$ 是 $P$ 上已經畫好的顏色，$C$ 是混合後留在 $P$ 上的顏色。水的顏色是 (0.1, 0.4, 0.5)、$\alpha = 0.6$，$P$ 上原本是石頭的灰色 (0.5, 0.5, 0.5)：
+
+$$C = 0.6 \times (0.1, 0.4, 0.5) + 0.4 \times (0.5, 0.5, 0.5) = (0.26, 0.44, 0.50)$$
+
+公式要用到 $P$ 上原本的顏色，所以水後面的東西必須先畫好。這就是 transparent 物體排在 opaque 物體和天空之後的原因。接續上面的表：
+
+| 順序 | 誰 | 距離 | 和記錄比較 | 之後 $P$ 的顏色 | 之後 $P$ 的記錄 |
+| --- | --- | --- | --- | --- | --- |
+| 3 | 水面 | 4 m | 比 7 m 近，通過 | 混合成 (0.26, 0.44, 0.50) | 仍是 7 m |
+
+水通過了比較，卻沒有改記錄：transparent 物體預設只比較、不寫入 (Shader Graph 的 Depth Write 預設 Auto，opaque 的寫、transparent 的不寫)。水擋不住後面的東西，記錄裡就不把它當成擋住的東西。比較還是要做：在石頭露出水面那一段，水面在石頭後面，比較時被丟掉，石頭才會擋在水前面。
+
+順序反過來會怎樣？假設水先畫、石頭後畫：水和還沒有石頭的 $P$ 混合，而且沒寫入記錄；接著石頭來了，7 m 比記錄的「最遠」近，通過，直接用石頭的灰色蓋掉。水裡那一段石頭，看起來就像沒泡在水裡。
+
+<ex-fig of="water-draw-order-mistakes" caption="從攝影機看到的石頭：水最後畫 (左)，與水先畫、石頭後畫 (右)" />
+
+### 水讀得到的那張圖
+
+opaque 物體和天空畫完、水還沒畫的那一刻，depth buffer 記著每個像素上最近的 opaque 物體的遠近。URP 在這時把它複製一份，叫 [[depth texture]]；也把這時的畫面拍一張快照，叫 [[opaque texture]]。兩張圖都在水畫之前準備好，所以裡面沒有水。(這兩張圖要在 URP Asset 勾選 Depth Texture、Opaque Texture 兩個選項才會準備。)
+
+<ex-fig of="frame-render-order-water" caption="一幀的順序" />
+
+水畫得最晚，它的 fragment shader 讀得到這兩張圖。在 $P$，水面自己在 4 m，depth texture 說後面的石頭在 7 m：視線在水裡走了 3 m。眼前的水就是這樣：水越厚，後面的東西越看不清、顏色越深；靠岸的淺水只有幾公分，幾乎看得到底。opaque texture 則讓水拿得到「後面長什麼樣子」，可以再加以扭曲或染色。
+
+## 回頭看
+
+### 回到開頭的兩個問題
+
+**水面上的三角形**：mesh 裡存著三個 vertex 的位置、normal、UV；vertex shader 讓 vertex 隨波浪起伏，交出它們的 clip space 座標，GPU 再換成畫面上的位置；從攝影機看是順時針，是正面，留下來；rasterization 找出它蓋住的像素，每個像素一個 fragment；三個 vertex 的資料 interpolate 到每個 fragment；fragment shader 用 UV sample texture、用 normal map 補上細小的波紋，算出顏色和 alpha。
+
+**一整幀**：opaque 的石頭和湖底先畫，depth buffer 讓每個像素留下最近的那一個；天空填滿剩下的像素；URP 把這時的遠近與畫面存成 depth texture 和 opaque texture；最後畫水，和後面已經畫好的顏色混合，也能讀那兩張圖，知道後面東西的遠近和長相。
+
+### 之後親眼看這個順序
+
+建好場景之後，可以用 Frame Debugger (Window > Analysis > Frame Debugger) 親眼看這個順序：按 Enable 擷取一幀，在事件清單上逐項往下點，Game view 會顯示畫到那一項為止的畫面。清單上各項的名稱以實際看到的為準。
+
+### 下一步
+
+下一章是 [URP Setup](urp-setup.html)：建立練習專案，挖出這片湖，擺上石頭和水面。
+
+## 來源
+
+### 官方文件
+
+Unity 6.3 手冊、Script Reference 與 Shader Graph 17.3 手冊：
+
+- vertex data 與三角形索引、繞行方向 (順時針為正面)：[Mesh vertex data](https://docs.unity.com/en-us/engine/6000.3/manual/assets-and-media/asset-types/mesh/get-started-with-meshes/anatomyofa/vertex-data)、[Mesh index data](https://docs.unity.com/en-us/engine/6000.3/manual/assets-and-media/asset-types/mesh/get-started-with-meshes/anatomyofa/index-data)
+- culling：[ShaderLab command: Cull](https://docs.unity.com/en-us/engine/6000.3/manual/materials-and-shaders/shaders/reference/sl-reference/sl-commands/sl-cull)
+- vertex shader 與 fragment shader 的分工：[Introduction to HLSL shader programs](https://docs.unity.com/en-us/engine/6000.3/manual/materials-and-shaders/shaders/writing-custom/shader-writing/sl/writing-shader-writing-shader-programs-hlsl/programs-introduction)
+- Graph Settings (Surface Type、Blending Mode、Render Face、Depth Write)：[Lit shader graph reference for URP](https://docs.unity.com/en-us/engine/6000.3/manual/materials-and-shaders/built-in/shaders-in-universalrp/prebuilt-shader-graphs-urp/lit)
+- 混合的公式：[Blending Modes in URP](https://docs.unity.com/en-us/engine/6000.3/manual/materials-and-shaders/built-in/shaders-in-universalrp/reference/blending-modes)
+- node：[Is Front Face](https://docs.unity3d.com/Packages/com.unity.shadergraph@17.3/manual/Is-Front-Face-Node.html)、[Tiling And Offset](https://docs.unity3d.com/Packages/com.unity.shadergraph@17.3/manual/Tiling-And-Offset-Node.html)、[Sample Texture 2D](https://docs.unity3d.com/Packages/com.unity.shadergraph@17.3/manual/Sample-Texture-2D-Node.html)
+- UV 的原點與範圍：[Mesh.uv](https://docs.unity.com/en-us/engine/6000.3/script-reference/unityengine/mesh/uv)；Wrap Mode：[TextureWrapMode](https://docs.unity.com/en-us/engine/6000.3/script-reference/unityengine/texturewrapmode)；Filter Mode：[FilterMode](https://docs.unity.com/en-us/engine/6000.3/script-reference/unityengine/filtermode)；[Mipmaps](https://docs.unity.com/en-us/engine/6000.3/manual/materials-and-shaders/textures/textures-getting-started/texture-mipmaps-introduction)
+- normal map 的匯入：[Normal Map texture Import Settings](https://docs.unity.com/en-us/engine/6000.3/manual/materials-and-shaders/textures/textures-reference/texture-type-normal-map)
+- Render queue、排序、天空畫在 opaque 與 transparent 之間：[Render queues and sorting behaviours](https://docs.unity.com/en-us/engine/6000.3/manual/cameras/built-in-rendering-order)、[RenderQueue](https://docs.unity.com/en-us/engine/6000.3/script-reference/unityengine/rendering/renderqueue)
+- URP 一幀的順序：[Injection points reference for URP](https://docs.unity.com/en-us/engine/6000.3/manual/render-pipelines/universal-render-pipeline/customizing-urp/inject-a-render-pass/custom-pass-injection-points)
+- Depth Texture、Opaque Texture：[Universal Render Pipeline Asset](https://docs.unity.com/en-us/engine/6000.3/manual/render-pipelines/universal-render-pipeline/urp-reference/universalrp-asset)
+- Frame Debugger：[Debug a frame](https://docs.unity.com/en-us/engine/6000.3/manual/analysis/graphics-performance-profiling/profile-rendering/frame-debugger/debug)
+
+### 一般圖學知識
+
+interpolation 的 weight (barycentric coordinates，重心座標：用三個 vertex 的 weight 表示三角形內的位置) 是一般圖學知識，Unity 手冊沒有專頁說明。Shader Graph interpolation 的預設方式見 [Custom Interpolator reference](https://docs.unity3d.com/Packages/com.unity.shadergraph@17.3/manual/Custom-Interpolators-reference.html)。
+</script>
+<script>
+explainer({
+  title: 'Shader Basics',
+  assumes: ['Unity 編輯器的基本操作，知道 Mesh、Material、GameObject (看完 Unity Learn 的 Basic 與 Creative Core)', '高中數學'],
+  approach: '追蹤一個實例：跟著水面上的一個三角形從 vertex data 走到像素，再看整幀裡誰先畫、誰後畫',
+  terms: {
+    'shader': '在 GPU 上跑的小程式，決定 vertex 放在哪裡、像素是什麼顏色',
+    'vertex shader': '對每個 vertex 各跑一次的程式：可以先移動 vertex (例如做出波浪)，並交出 vertex 經攝影機換算後的座標 (clip space 座標)',
+    'clip space': { def: 'vertex 經攝影機換算後的座標 (4 個分量)，是交給 GPU 的一組座標，還不是畫面上的位置；GPU 之後自己換成畫面上的位置', href: 'vector-math.html' },
+    'fragment shader': '對每個 fragment 各跑一次的程式：算出它的顏色與 alpha',
+    'object space': { def: '相對於物件自己原點與軸的座標，也叫 local 座標；mesh 的 vertex 存的就是它', href: 'vector-math.html' },
+    'world space': { def: '整個場景共用的座標，y 向上，單位公尺', href: 'vector-math.html' },
+    'mesh': '網格：由 vertex 與三角形組成的形狀資料',
+    'normal': { def: '法線：垂直於表面、朝外的方向，光照用它決定亮暗', href: 'vector-math.html' },
+    'culling': '剔除：三角形從攝影機看是逆時針 (背面) 時，預設直接不畫',
+    'depth test': 'fragment 寫進像素之前先和 depth buffer 的記錄比較：比記錄近 (或一樣近) 就通過，比記錄遠就丟掉',
+    'interpolation': '插值：fragment 的值由三個 vertex 的值依 weight 算出',
+    'sampling': '取樣：用 UV 去 texture 上取顏色',
+    'rasterization': '光柵化：GPU 找出三角形蓋住哪些像素，每個像素產生一個 fragment',
+    'fragment': '一個三角形在一個像素上的候選結果；最後會不會留在畫面上，要看 depth test',
+    'alpha': '透明度：0 是完全透明，1 是完全不透明',
+    'UV': '貼圖座標：vertex 帶著的 texture 座標；(0, 0) 是 texture 左下角，(1, 1) 是右上角',
+    'texel': 'texture 上的一格，和畫面上的像素分開稱呼',
+    'mipmap': '同一張 texture 預先縮小成的一組版本，每層長寬減半；遠處用小的那層',
+    'normal map': '法線貼圖：每個 texel 存一個方向，用來取代 interpolation 後的 normal，讓平的表面有起伏的光影',
+    'depth buffer': '和畫面一樣大的記錄，每個像素記著目前畫在這裡的東西的遠近 (代表遠近的數，不是距離本身)',
+    'render queue': 'Unity 排繪製先後的數字，小的先畫：opaque 的 Geometry (2000)，transparent 的 Transparent (3000)',
+    'depth texture': 'opaque 物體畫完、transparent 物體畫之前，depth buffer 的複本；水讀它得到後面東西的遠近，換算後才是距離',
+    'opaque texture': '畫 transparent 物體之前，畫面上 opaque 物體的快照',
+  },
+});
+</script>
+</body>
+</html>

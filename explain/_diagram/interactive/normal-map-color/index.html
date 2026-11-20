@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>n_tangent 的 −1~1 存成顏色 0~1</title>
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <p class="concl">n<sub>tangent</sub> 向量 −1~1 存成顏色 0~1</p>
+
+  <div class="grid">
+    <section class="pad card" aria-label="normal 方向">
+      <span class="name">n<sub>tangent</sub> 的 <b class="lx">x</b>、<b class="ly">y</b></span>
+      <div class="plot"><canvas id="pad" tabindex="0" role="application" aria-label="圓形拖曳板，拖曳設定 normal 的 x 與 y，方向鍵微調"></canvas></div>
+      <span class="cap zf"><b class="lz">z</b> = √(1−<b class="lx">x</b>²−<b class="ly">y</b>²)</span>
+    </section>
+
+    <section class="vec card" aria-label="normal vector">
+      <span class="name">n<sub>tangent</sub></span>
+      <div class="plot"><canvas id="vec" tabindex="0" aria-label="3D 向量圖，畫出 x、y、z 三軸與目前的 normal vector，向量尖端是存成的顏色；拖曳或用方向鍵旋轉視角"></canvas></div>
+    </section>
+
+    <section class="conv card" aria-label="向量換成顏色">
+      <div class="head"><span class="name">存成顏色</span><span class="fx num">c = (v + 1) / 2</span></div>
+      <div class="rows">
+        <div class="row" id="r-x" style="--tone: var(--xx)">
+          <span class="nm n1"><i class="dot"></i><b>x</b></span><span class="nm n2"><em>R</em></span>
+          <span class="end e1">−1</span><div class="trk"><i class="bar b1"></i><i class="bar b2"></i><i class="tie"></i><i class="pt p1"></i><i class="pt p2"></i></div><span class="end e1 hi">1</span>
+          <output class="vv"><s>v</s><span></span></output>
+          <span class="end e2">0</span><span class="end e2 hi">1</span>
+          <output class="cv"><s>c</s><span></span></output>
+        </div>
+        <div class="row" id="r-y" style="--tone: var(--yy)">
+          <span class="nm n1"><i class="dot"></i><b>y</b></span><span class="nm n2"><em>G</em></span>
+          <span class="end e1">−1</span><div class="trk"><i class="bar b1"></i><i class="bar b2"></i><i class="tie"></i><i class="pt p1"></i><i class="pt p2"></i></div><span class="end e1 hi">1</span>
+          <output class="vv"><s>v</s><span></span></output>
+          <span class="end e2">0</span><span class="end e2 hi">1</span>
+          <output class="cv"><s>c</s><span></span></output>
+        </div>
+        <div class="row" id="r-z" style="--tone: var(--zz)">
+          <span class="nm n1"><i class="dot"></i><b>z</b></span><span class="nm n2"><em>B</em></span>
+          <span class="end e1">−1</span><div class="trk"><i class="bar b1"></i><i class="bar b2"></i><i class="tie"></i><i class="pt p1"></i><i class="pt p2"></i></div><span class="end e1 hi">1</span>
+          <output class="vv"><s>v</s><span></span></output>
+          <span class="end e2">0</span><span class="end e2 hi">1</span>
+          <output class="cv"><s>c</s><span></span></output>
+        </div>
+      </div>
+      <div class="sw">
+        <div class="chip" id="chip" role="img" aria-label="存起來的顏色"></div>
+        <div class="sr">
+          <output class="hex" id="hex"></output>
+          <span class="rgb num"><b class="lx">R</b> <output id="bR"></output> <b class="ly">G</b> <output id="bG"></output> <b class="lz">B</b> <output id="bB"></output></span>
+        </div>
+        <button type="button" id="reset" aria-label="重設為沒有傾斜 (0, 0, 1)">重設</button>
+      </div>
+    </section>
+
+    <section class="map card" aria-label="ripple normal map">
+      <span class="name">ripple normal map</span>
+      <div class="plot"><canvas id="map" tabindex="0" aria-label="程式算出的 ripple normal map，大多是淡藍紫，坡面偏紅或偏綠；滑過一點會取它的 normal"></canvas></div>
+    </section>
+  </div>
+
+  <script src="./script.js"></script>
+</body>
+</html>

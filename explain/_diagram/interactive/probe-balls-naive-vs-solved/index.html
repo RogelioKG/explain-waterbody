@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>球心放在查到的高度：直接代公式與反推 4 次</title>
+<link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <header class="top">
+    <p class="concl lines">
+      <span class="line" data-mode="naive">直接代公式：斜坡上的<span class="k-ball">球</span>懸空</span>
+      <span class="line" data-mode="solved">反推 4 次：每顆<span class="k-ball">球</span>都一半泡在<span class="k-water">水</span>裡</span>
+    </p>
+  </header>
+  <main class="stage card">
+    <div class="meta">
+      <p class="cap"><span class="dot" style="--tone: var(--ball)"></span><span class="k-ball">球心</span>放在查到的高度</p>
+      <p class="read" aria-live="polite"><span class="rl">球心高出<span class="k-water">水面</span>最多</span><output id="maxv"></output><em class="badge" id="badge"></em></p>
+    </div>
+    <div class="plot"><canvas id="cv" aria-label="單一個 Gerstner 波的剖面 (陡度 0.5、波長 6 m)，一排直徑 0.2 m 的測試小球，球心放在查到的高度；水平與垂直同比例"></canvas></div>
+    <p class="cap scale"><span class="sb"><i class="bar" id="bar" aria-hidden="true"></i><span class="num">1 m</span></span><span>陡度 0.5、波長 6 m</span><span>球直徑 0.2 m</span><span>水平垂直同比例</span></p>
+  </main>
+  <section class="ctl card" aria-label="控制">
+    <div class="seg" role="group" aria-label="查詢方式">
+      <button type="button" id="mNaive" aria-pressed="true">直接代公式</button>
+      <button type="button" id="mSolved" aria-pressed="false">反推 4 次</button>
+    </div>
+    <div class="play">
+      <button type="button" id="play" aria-pressed="false">播放</button>
+      <span class="cap">慢放 0.5×</span>
+    </div>
+  </section>
+  <script src="./script.js"></script>
+</body>
+</html>

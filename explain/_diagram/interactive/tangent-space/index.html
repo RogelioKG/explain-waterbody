@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>tangent space：同一個 n_tangent，偏離 N 一樣大</title>
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <p class="concl">同一個 n_tangent，偏離 N 一樣大</p>
+
+  <div class="grid">
+    <section class="pad card" aria-label="n_tangent">
+      <span class="name">n<sub>tangent</sub> 往 <b class="lt">T</b>、<b class="lb">B</b> 偏</span>
+      <div class="plot sq"><canvas id="pad" tabindex="0" role="application" aria-label="圓形拖曳板，拖曳設定 n_tangent 的 x 與 y，方向鍵微調"></canvas></div>
+    </section>
+
+    <section class="ctls card" aria-label="斜坡的傾斜">
+      <label class="ctl"><span><i class="dot"></i><span>斜坡左右傾斜</span><output id="o-a"></output></span>
+        <input type="range" id="in-a" list="zero" aria-label="斜坡左右傾斜的角度" min="-60" max="60" step="1" value="30" /></label>
+      <label class="ctl"><span><i class="dot"></i><span>斜坡前後傾斜</span><output id="o-b"></output></span>
+        <input type="range" id="in-b" list="zero" aria-label="斜坡前後傾斜的角度" min="-60" max="60" step="1" value="15" /></label>
+    </section>
+
+    <main class="stage card">
+      <div class="heads"><span class="name">平面</span><span class="name">斜坡</span></div>
+      <div class="plot"><canvas id="cv" tabindex="0" aria-label="3D 場景，左邊平面、右邊斜坡，各畫出 T、B、N 軸與換到 world space 的 n_world、未轉換的 n_tangent；拖曳或用方向鍵旋轉視角"></canvas></div>
+      <div class="reads">
+        <div class="read">
+          <div class="rows">
+            <span class="nm">n<sub>tangent</sub></span><span class="val">= <output id="t-flat"></output></span>
+            <span class="nm">n<sub>world</sub></span><span class="val terms">= <span class="term"><b id="x-flat"></b><em class="lt">T</em></span><i class="pl">+</i><span class="term"><b id="y-flat"></b><em class="lb">B</em></span><i class="pl">+</i><span class="term"><b id="z-flat"></b><em class="ln">N</em></span></span>
+            <span class="nm"></span><span class="val">= <output id="v-flat"></output></span>
+          </div>
+          <span class="ang">偏離 N <output id="a-flat"></output></span>
+        </div>
+        <div class="read">
+          <div class="rows">
+            <span class="nm">n<sub>tangent</sub></span><span class="val">= <output id="t-slope"></output></span>
+            <span class="nm">n<sub>world</sub></span><span class="val terms">= <span class="term"><b id="x-slope"></b><em class="lt">T</em></span><i class="pl">+</i><span class="term"><b id="y-slope"></b><em class="lb">B</em></span><i class="pl">+</i><span class="term"><b id="z-slope"></b><em class="ln">N</em></span></span>
+            <span class="nm"></span><span class="val">= <output id="v-slope"></output></span>
+          </div>
+          <span class="ang">偏離 N <output id="a-slope"></output></span>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <script src="./script.js"></script>
+<datalist id="zero"><option value="0"></option></datalist>
+</body>
+</html>

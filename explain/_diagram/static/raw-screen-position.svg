@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 492" width="900" height="492" font-family="'Noto Sans TC','Noto Sans CJK TC','Microsoft JhengHei','PingFang TC',sans-serif">
+  <desc>palette (色彩登記，主題：urp-water)
+    除以 w 之前: #26645d 方塊 / #8fd3c9 標籤
+    除以 w 之後: #2f59a2 方塊 / #b6cdf2 標籤
+    eye depth: #e9c27a 數字與標籤 / #d9a441 引線
+    arrow-solid: 換算 (旁邊標運算)
+  </desc>
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#c9ced6"/>
+    </marker>
+  </defs>
+  <rect x="1" y="1" width="898" height="490" rx="14" fill="#1f2329" stroke="#343a44"/>
+<text x="40.0" y="44.0" font-size="20" font-weight="700" fill="#ece8de">Raw 停在換算鏈的哪一站</text>
+<text x="40.0" y="70.0" font-size="13" fill="#98a0ab">Unity ComputeScreenPos；例：水面上一點，eye depth 10 m</text>
+<text x="210.0" y="118.0" font-size="13" font-weight="700" fill="#8fd3c9" text-anchor="middle">除以 w 之前</text>
+<text x="590.0" y="118.0" font-size="13" font-weight="700" fill="#b6cdf2" text-anchor="middle">除以 w 之後</text>
+<rect x="135.0" y="150" width="150" height="42" rx="8" fill="#26645d"/>
+<text x="210.0" y="177.0" font-size="16" font-weight="700" fill="#ffffff" text-anchor="middle">clip space</text>
+<rect x="515.0" y="150" width="150" height="42" rx="8" fill="#2f59a2"/>
+<text x="590.0" y="177.0" font-size="16" font-weight="700" fill="#ffffff" text-anchor="middle">NDC</text>
+<rect x="135.0" y="320" width="150" height="42" rx="8" fill="#26645d"/>
+<text x="210.0" y="347.0" font-size="16" font-weight="700" fill="#ffffff" text-anchor="middle">Raw</text>
+<rect x="515.0" y="320" width="150" height="42" rx="8" fill="#2f59a2"/>
+<text x="590.0" y="347.0" font-size="16" font-weight="700" fill="#ffffff" text-anchor="middle">Default</text>
+<line x1="297.0" y1="171.0" x2="503.0" y2="171.0" stroke="#c9ced6" stroke-width="1.6" marker-end="url(#ah)"/>
+<text x="400.0" y="162.0" font-size="15" font-weight="700" fill="#ece8de" text-anchor="middle">÷ w</text>
+<line x1="297.0" y1="341.0" x2="503.0" y2="341.0" stroke="#c9ced6" stroke-width="1.6" marker-end="url(#ah)"/>
+<text x="400.0" y="332.0" font-size="15" font-weight="700" fill="#ece8de" text-anchor="middle">÷ w</text>
+<text x="673.0" y="176.0" font-size="12" fill="#98a0ab">範圍 −1~1</text>
+<text x="673.0" y="346.0" font-size="12" fill="#98a0ab">範圍 0~1，螢幕 UV</text>
+<text x="169.3" y="214.0" font-size="15" xml:space="preserve"><tspan fill="#ece8de">(2, −4, z, </tspan><tspan fill="#e9c27a" font-weight="700">10</tspan><tspan fill="#ece8de">)</tspan></text>
+<text x="538.9" y="214.0" font-size="15" xml:space="preserve"><tspan fill="#ece8de">.xy = (0.2, −0.4)</tspan></text>
+<text x="173.4" y="384.0" font-size="15" xml:space="preserve"><tspan fill="#ece8de">(6, 3, z, </tspan><tspan fill="#e9c27a" font-weight="700">10</tspan><tspan fill="#ece8de">)</tspan></text>
+<text x="543.1" y="384.0" font-size="15" xml:space="preserve"><tspan fill="#ece8de">.xy = (0.6, 0.3)</tspan></text>
+<line x1="210" y1="228" x2="210" y2="310" stroke="#c9ced6" stroke-width="1.6" marker-end="url(#ah)"/>
+<line x1="590" y1="228" x2="590" y2="310" stroke="#c9ced6" stroke-width="1.6" marker-end="url(#ah)"/>
+<text x="222.0" y="267.0" font-size="15" font-weight="700" fill="#ece8de">xy × 0.5 + 0.5w</text>
+<text x="222.0" y="287.0" font-size="12" fill="#98a0ab">z、w 不變</text>
+<text x="602.0" y="273.0" font-size="15" font-weight="700" fill="#ece8de">xy × 0.5 + 0.5</text>
+<line x1="233.7" y1="391" x2="233.7" y2="421" stroke="#d9a441" stroke-width="1.5"/>
+<text x="223.7" y="439.0" font-size="15" font-weight="700" fill="#e9c27a">w = eye depth = 10 m</text>
+<text x="223.7" y="459.0" font-size="12" fill="#98a0ab">沿攝影機前方量，和 Scene Depth 同一種量</text>
+</svg>

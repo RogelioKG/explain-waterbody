@@ -1,0 +1,635 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reflection</title>
+<script src="../_explainer/explainer.js"></script>
+</head>
+<body>
+<script type="text/markdown" id="ex-content">
+## 這一章要解決的問題
+
+### 遠近看起來一樣透
+
+做完 [Refraction](refraction.html)，水下的東西跟著波紋晃，水面也有一些反光。但把攝影機壓低、看向對岸，遠處的淺水照樣看得到湖底，上面又蒙了一層亮，比岸上的地面還亮。真的湖不是這樣：低角度看遠處，水面像鏡子，映出天空；低頭看腳邊，才看得穿。
+
+這一章弄清楚現在的反光從哪來、為什麼低角度該反射得比較多，再補上缺的那一份：反射強的地方，透過水面看到的東西要相對變弱。接著讓倒影裡出現湖岸、認識太陽的亮點由什麼控制。新參數只有一個，放在設定資產 `SO_LakeWater` 裡；章末把算反射比例的 node 收成一個 Sub Graph。
+
+<ex-fig of="low-angle-reflection-before-after" caption="示意：攝影機壓低、看向對岸" />
+
+### 這一章怎麼走
+
+| 步驟 | 做什麼 | 接下來要處理的 |
+| --- | --- | --- |
+| [第一步](#第一步：找出水面上的天空色從哪來) | 找出水面上的天空色從哪來 | 低角度反射變強，湖底卻照樣清楚 |
+| [第二步](#第二步：算出反射和透過各佔多少) | 算出反射和透過各佔多少 | 透過水面的那一份沒有隨角度變弱 |
+| [第三步](#第三步：讓透過水面的部分隨角度變弱) | 讓透過水面的部分隨角度變弱 | 倒影裡只有天空 |
+| [第四步](#第四步：讓倒影裡出現湖岸) | 放一個 Reflection Probe | 太陽的亮點還不知道由什麼控制 |
+| [第五步](#第五步：認識太陽的-specular) | 認識太陽的 specular | 新參數只在 Material 上 |
+| [第六步](#第六步：把新參數搬進設定資產) | 參數搬進設定資產 | 算反射比例的三個 node 還散在主 graph 上 |
+| [第七步](#第七步：把這一章的-node-收成-Sub-Graph) | 把這一章的 node 收成 Sub Graph | |
+
+每一步之後都有「現在應該看到」、預期與常見錯誤並排的示意圖和對照表。大部分的示意圖是攝影機壓低、看向對岸：上方是天空與對岸，中間偏右是半泡的石頭，左下是淺處的魚。[第七步](#第七步：把這一章的-node-收成-Sub-Graph)只整理 graph，水面不變。
+
+## 第一步：找出水面上的天空色從哪來
+
+### 先弄清楚這層亮是誰加的
+
+**低角度蓋在湖底上的那層天空色，不是 graph 裡哪個 node 做的，是 URP Lit 自己加的 environment reflection。要讓湖底在低角度變弱，得先知道反射這一份由誰加、受什麼控制、隨角度怎麼變，才分得出哪一份已經對了、哪一份要補；所以這一步不改 graph，只把它關掉再打開來看。**
+
+下面依序展開：Lit 怎麼算出這層反光；動手用三種方式關掉它；關掉之後各看到什麼。
+
+### Lit 會把周圍的環境反射在表面上
+
+水的 graph 是 URP Lit。Lit 除了照太陽，還會做[[environment reflection]] (環境反射)：每個像素依自己的 normal，算出視線被表面反彈後的方向，到一張「周圍環境的照片」裡取那個方向的顏色，加到最後的顏色上。
+
+算反彈方向要的兩個方向，前面都出現過：
+
+- normal：接 Normal block 的那一個，含細波紋。它是最後那個 Normal Strength (接 Normal block 的那個) 的輸出 $\mathbf{n}$，在 tangent space；Lit 先把它轉到 world space 再用。[Refraction 第六步](refraction.html#第六步：讓大浪也偏折)在主 graph 用 Transform 做了同一個轉換，記作 $\mathbf{n}_{\text{ws}} = \operatorname{normalize}(n_x\,T + n_y\,B + n_z\,N)$，大浪的坡面也在裡面。
+- 視線：[Vector Math](vector-math.html) 記作 $i$，從攝影機指向水面，長度 1。
+
+反彈後的方向就是 Vector Math 的 reflection vector：
+
+$$r = \operatorname{reflect}(i,\ \mathbf{n}_{\text{ws}}) = i - 2\,(i \cdot \mathbf{n}_{\text{ws}})\,\mathbf{n}_{\text{ws}}$$
+
+那張照片是 [[cubemap]]：從一點往上下左右前後六個方向各拍一張，拼成一個盒子，用方向就能查到顏色。從它沿 $r$ 取到的顏色記作 $C_{\text{env}}$。照片的來源設在 Lighting 視窗 (Window > Rendering > Lighting) 的 **Environment** 分頁，**Environment Reflections** 區塊的 **Source**，預設是 **Skybox**：反射的就是天空盒。
+
+Lit 把 $C_{\text{env}}$ 乘上一個比例再加上去，這個比例怎麼算在[第二步](#第二步：算出反射和透過各佔多少)。加多少、清不清楚，由 Smoothness 決定：越接近 1 反射越清楚、越強；0 時反射糊成一片，而且弱到幾乎看不見。
+
+### 動手看：三個開關
+
+`WaterBody` 每格把設定資產的值寫進 Material，所以 Smoothness 要在 `SO_LakeWater` 改，改 Material 會被蓋回。
+
+1. 壓低攝影機
+
+   用 Scene 視窗攝影機 (按住右鍵加 WASD 飛行)，飛到水邊、離水面約 0.5 公尺，看向對岸。遠處的水面帶著天空的顏色；腳邊的淺水看得到湖底。
+
+2. Smoothness 改成 0，再改回 0.9
+
+   在 `SO_LakeWater` 把 Smoothness 改成 0：遠處的天空色消失，遠近一樣透。改回 0.9，天空色回來。
+
+3. 俯視比較
+
+   把攝影機升到水面上約 5 公尺、朝正下方看，再做一次上一步：Smoothness 0 與 0.9 幾乎沒有差別。同樣的反射，俯視時弱得多，原因在[第二步](#第二步：算出反射和透過各佔多少)。
+
+4. 反射的來源改成 0，再改回來
+
+   Lighting 視窗的 **Environment Reflections** 區塊，**Intensity Multiplier** 先記下原本的值，改成 0：低角度的天空色消失，太陽附近的亮點還在 (亮點是另一件事，見[第五步](#第五步：認識太陽的-specular))。改回原本的值。
+
+   這個區塊上面的 **Environment Lighting** 也有一個 Intensity Multiplier，那是環境光，不要改到它。
+
+### 現在應該看到
+
+- Smoothness 0.9 時，低角度的遠處帶天空的顏色；改成 0 就消失。
+- 俯視時，Smoothness 改來改去幾乎看不出差別。
+- 反射的 Intensity Multiplier 改成 0，天空色消失，太陽的亮點還在。
+- 低角度看遠處的**淺水**，湖底照樣清楚，而且比岸上的地面亮，像天空的反光直接疊在湖底上。
+
+<ex-fig of="smoothness-sky-reflection-check" caption="示意：攝影機壓低、看向對岸" />
+
+| 看到的現象 | 原因通常是 | 怎麼修 |
+| --- | --- | --- |
+| 改 Smoothness 沒有變化 | 改到了 `M_LakeWater` Material 上的值，被 `WaterBody` 蓋回 | 改 `SO_LakeWater` |
+| 低角度也看不到天空色 | Smoothness 不是 0.9；或 environment reflection 沒有內容 (見「請回報」) | 設定資產填 0.9 |
+| 改 Intensity Multiplier 後天空色還在，背光的地方變暗 | 改到 Environment Lighting 的那一個 | 改回，改 Environment Reflections 的 |
+
+### 反射有了，湖底卻沒有讓位
+
+這一步確定了：低角度那層天空色是 Lit 的 environment reflection，來源是天空盒，強弱由 Smoothness 管，而且同樣的設定，低角度強、俯視弱。
+
+但反射在低角度變強時，透過水面看到的湖底照樣清楚，兩者疊在一起，所以比岸上亮。要說清楚湖底該讓多少，得先知道一條視線碰到水面時，反射和透過各佔多少，以及這個比例為什麼隨角度變。所以下一步先算這個比例。
+
+## 第二步：算出反射和透過各佔多少
+
+### 反射和透過加起來是 1
+
+**視線碰到水面，眼睛收到的光分成兩份：從反射方向來的天空，和從水裡穿出來的湖底，兩份的比例加起來是 1，反射的比例隨角度變大。Lit 已經讓反射照這個比例變強，但從水裡出來的那一份一直是整份，合計超過 1，所以低角度又亮又白。**
+
+下面依序展開：兩份光怎麼分；反射的比例怎麼算；Lit 做了哪一份；缺的那一份差多少。
+
+### 一條視線收到兩份光
+
+視線碰到水面的一點 $P$，眼睛從 $P$ 收到的光來自兩個方向：
+
+- 從反射方向 $r$ 來的光：天空、湖岸。佔的比例記作 $F_{\text{r}}$。
+- 從水裡穿出水面的光：湖底、魚、水自己的顏色。佔的比例是剩下的 $1 - F_{\text{r}}$。
+
+[Refraction](refraction.html) 裡的 $F$ 已經是細波紋的遠處淡出，所以反射的比例加下標 r (reflection) 分開。
+
+[[Fresnel]] 效應說的是：$F_{\text{r}}$ 隨角度改變。角度指視線和 normal 的夾角 $\theta$，用[第一步](#第一步：找出水面上的天空色從哪來)的 $i$、$\mathbf{n}_{\text{ws}}$ 寫成：
+
+$$\cos\theta = -\,i \cdot \mathbf{n}_{\text{ws}}$$
+
+因為 $i$ 朝著水面往下、$\mathbf{n}_{\text{ws}}$ 朝上，兩者的夾角是 $180° - \theta$，所以加負號。正俯視時 $\theta = 0$，視線貼著水面時接近 90 度；它就是 Vector Math 的 Snell 定律裡的 $\theta_1$。$\theta$ 小時，幾乎全部是水裡的光；$\theta$ 接近 90 度時，大半是反射。
+
+### Schlick 近似
+
+精確的 Fresnel 公式很長，shader 裡通常用 Schlick 的近似：
+
+$$F_{\text{r}}(\theta) \approx F_{\text{r}}(0) + \big(1 - F_{\text{r}}(0)\big)\,(1 - \cos\theta)^5, \qquad F_{\text{r}}(0) = \left(\frac{n_2 - n_1}{n_2 + n_1}\right)^2$$
+
+$F_{\text{r}}(0)$ 是正俯視時的反射比例；$n_1$、$n_2$ 是 Vector Math 的 Snell 定律用過的兩邊的折射率，空氣 $n_1 = 1$，水 $n_2 = 1.33$。代入水：
+
+$$F_{\text{r}}(0) = \left(\frac{1.33 - 1}{1.33 + 1}\right)^2 = \left(\frac{0.33}{2.33}\right)^2 \approx 0.020$$
+
+正俯視只反射 2%。$(1 - \cos\theta)^5$ 在角度小時幾乎是 0，到 60 度以後才快速升高：
+
+| $\theta$ | 30° | 60° | 75° | 80° | 85° |
+| --- | --- | --- | --- | --- | --- |
+| $F_{\text{r}}$ (水) | 0.02 | 0.05 | 0.24 | 0.40 | 0.64 |
+
+換成站在岸邊看：眼睛離水面 1.7 公尺、看水平距離 $\ell$ 外的水面時
+
+$$\tan\theta = \frac{\ell}{1.7}$$
+
+$\ell$ = 2、5、10、20 公尺分別是 $\theta \approx$ 50°、71°、80°、85°。所以 10 公尺以內大致看得穿，再遠就越來越像鏡子。
+
+<iframe src="../_diagram/interactive/fresnel-split-vs-distance/index.html" title="站在岸邊看多遠，水面才開始像鏡子？" style="height:440px"></iframe>
+
+### Lit 已經做了反射那一份
+
+[第一步](#第一步：找出水面上的天空色從哪來)看到「低角度天空色強、俯視幾乎沒有」，就是 Lit 自己也讓反射隨角度變。依 URP 的原始碼，Lit 給 environment reflection 的比例是這樣算的：
+
+```hlsl 對照：URP Lit 算 environment reflection 的比例 (GlobalIllumination.hlsl、BRDF.hlsl，整理過)
+half NoV = saturate(dot(normalWS, viewDirectionWS));   // cos θ
+half fresnelTerm = Pow4(1.0 - NoV);                    // (1 − cos θ) 的 4 次方
+reflection = indirectSpecular * surfaceReduction * lerp(brdfData.specular, brdfData.grazingTerm, fresnelTerm);
+```
+
+寫成式子，把比例記作 $F_{\text{lit}}$ (Lit 的反射比例，和水的 $F_{\text{r}}$ 分開)：
+
+$$\mathcal{L}_{\text{env}} = F_{\text{lit}}(\theta)\,C_{\text{env}}, \qquad F_{\text{lit}}(\theta) = \rho\,\operatorname{lerp}\big(0.04,\ g,\ (1 - \cos\theta)^4\big)$$
+
+$$g = \min(\sigma + 0.04,\ 1), \qquad \rho = \frac{1}{(1 - \sigma)^4 + 1}$$
+
+| 符號 | 原始碼裡的名稱 | 意思 |
+| --- | --- | --- |
+| $\mathcal{L}_{\text{env}}$ | `reflection` | Lit 加上去的 environment reflection |
+| $C_{\text{env}}$ | `indirectSpecular` | 從 cubemap 沿 $r$ 取到的顏色；Smoothness 越低取得越糊 |
+| $\sigma$ | `smoothness` | Smoothness |
+| 0.04 | `brdfData.specular` | 正俯視時的比例；Metallic 是預設的 0 時固定 0.04 |
+| $g$ | `brdfData.grazingTerm` | 掠射時的比例 |
+| $\rho$ | `surfaceReduction` | Smoothness 越低越小 |
+
+Smoothness 0.9 代入：
+
+$$\rho = \frac{1}{0.1^4 + 1} \approx 1, \qquad g = 0.94, \qquad F_{\text{lit}}(\theta) \approx 0.04 + 0.9\,(1 - \cos\theta)^4$$
+
+Smoothness 0 時 $\rho = \dfrac{1}{1 + 1} = 0.5$、$g = 0.04$，每個角度都是 $F_{\text{lit}} = 0.5 \times 0.04 = 0.02$，所以[第一步](#第一步：找出水面上的天空色從哪來)改成 0 時反射幾乎消失。
+
+$F_{\text{lit}}$ 和水的 $F_{\text{r}}$ 很接近：80 度時 0.46 對 0.40，85 度時 0.67 對 0.64。所以反射這一份不用改，**也不要再乘一次 Fresnel**：兩次相乘，80 度時只剩 $0.46 \times 0.40 \approx 0.18$，中間角度的反射會太弱。
+
+### 缺的那一份：從水裡出來的光沒有變弱
+
+先回想 Refraction 做完時，畫面上的顏色怎麼組成：
+
+$$C_{\text{out}} = \underbrace{\tau\,(1 - f)\,C_{\text{tint}}\,C_{\text{scene}}}_{E} + \mathcal{L}\big(\underbrace{\operatorname{lerp}(\alpha\,C_{\text{deep}},\ C_{\text{foam}},\ f)}_{C_{\text{base}}}\big), \qquad C_{\text{tint}} = \operatorname{lerp}(\mathbf{1},\ C_{\text{shallow}},\ \alpha)$$
+
+| 符號 | 意思 | graph 裡從哪接出來 |
+| --- | --- | --- |
+| $C_{\text{scene}}$ | Scene Color 從 opaque texture 讀到的水面後方畫面 (湖底、石頭、魚)，在扭曲後的位置讀 | 主 graph 的 Scene Color (UV ← `SSG_Refraction_Select` 的 FinalUV) |
+| $\tau$ | 透光率 $e^{-k h_1}$：湖底的光穿過水剩下的比例，水越厚越小 | `SSG_Absorption` 的 Transmittance |
+| $\alpha$ | $\operatorname{saturate}(1 - \tau)$：被水擋掉的比例 | `SSG_Absorption` 的 Opacity |
+| $C_{\text{tint}}$ | 湖底的光穿過水被染上的顏色，從白色 $\mathbf{1}$ 漸變到 ShallowColor ($C_{\text{shallow}}$) | Lerp「染色」 |
+| $C_{\text{deep}}$、$C_{\text{foam}}$ | DeepColor、FoamColor | Property `DeepColor`、`FoamColor` |
+| $f$ | 泡沫的遮罩：1 是泡沫，0 是沒有泡沫 | `SSG_Foam` 的 Foam |
+| $E$ | 接 Emission 的值：不打光，直接加到最後的顏色上 | Multiply「Emission」 |
+| $C_{\text{base}}$ | 接 Base Color 的值；Alpha 填 1 | Lerp「泡沫色」 |
+| $\mathcal{L}(\cdot)$ | Lit 打光：給它 Base Color，它還你打過光的顏色 | (Lit 內部，不在 graph 裡) |
+
+這一章要看清楚 $\mathcal{L}$ 裡有哪幾份。依 URP 的原始碼，Lit 打過光的顏色是三份相加：
+
+$$\mathcal{L}(C_{\text{base}}) = \mathcal{L}_{\text{diff}}(C_{\text{base}}) + \mathcal{L}_{\text{sun}} + \mathcal{L}_{\text{env}}$$
+
+| 符號 | 意思 |
+| --- | --- |
+| $\mathcal{L}_{\text{diff}}$ | diffuse：往各方向散開的光，顏色由 Base Color 決定 |
+| $\mathcal{L}_{\text{sun}}$ | 太陽的 specular ([第五步](#第五步：認識太陽的-specular)) |
+| $\mathcal{L}_{\text{env}}$ | environment reflection (上一節) |
+
+Refraction 的「簡化」裡沒有乘 $\alpha'$ 的 $\mathcal{L}_{\text{spec}}$，就是後兩份的和 $\mathcal{L}_{\text{sun}} + \mathcal{L}_{\text{env}}$；這一章要分開看，所以拆成兩個。因為 Metallic 是 0，後兩份的比例都從固定的 0.04 起算，不看 Base Color，所以三份裡只有 $\mathcal{L}_{\text{diff}}$ 會隨 Base Color 變。
+
+看遠處沒有泡沫的水，$f = 0$，代入：
+
+$$C_{\text{out}} = \tau\,C_{\text{tint}}\,C_{\text{scene}} + \mathcal{L}_{\text{diff}}(\alpha\,C_{\text{deep}}) + \mathcal{L}_{\text{sun}} + F_{\text{lit}}(\theta)\,C_{\text{env}}$$
+
+前兩項是從水裡出來的光：湖底乘 $\tau$、深水色乘 $\alpha$，$\tau + \alpha = 1$，份量只看水的厚度，不看角度。最後一項是反射，乘著隨角度變大的 $F_{\text{lit}}(\theta)$。$\mathcal{L}_{\text{sun}}$ 只在對準太陽的地方出現，先不算。所以兩份光的權重合計是
+
+$$1 + F_{\text{lit}}(\theta)$$
+
+俯視時 $1 + 0.04 = 1.04$；80 度時 $1 + 0.46 = 1.46$；85 度時 $1 + 0.67 = 1.67$。低角度時反射升到四五成以上，從水裡出來的光照樣整份，這就是[第一步](#第一步：找出水面上的天空色從哪來)最後看到的又亮又白、湖底照樣清楚。
+
+修法是讓從水裡出來的那一份乘上 $1 - F_{\text{r}}$。因為 $F_{\text{lit}} \approx F_{\text{r}}$，所以每個角度的合計都接近 1：
+
+$$(1 - F_{\text{r}}) + F_{\text{lit}}(\theta) \approx 1$$
+
+<ex-fig of="fresnel-energy-sum-curve" caption="左：現在。右：接上 1 − F_r 之後" />
+
+到這裡知道：反射那一份 Lit 已經做了，而且和水的 $F_{\text{r}}$ 接近，不用動；缺的是從水裡出來的那一份要乘 $1 - F_{\text{r}}$。但 graph 裡還沒有 $F_{\text{r}}$，它要從視線和 normal 的夾角算出來。所以下一步先用一個 node 算出 $F_{\text{r}}$，再乘到從水裡出來的那幾項上。
+
+## 第三步：讓透過水面的部分隨角度變弱
+
+### 從水裡出來的光要隨角度讓位
+
+**從水裡出來的光乘上 $1 - F_{\text{r}}$，和 Lit 的反射合計才回到 1。$F_{\text{r}}$ 用 Fresnel Effect node 算，normal 接 Lit 算反射用的同一個 $\mathbf{n}_{\text{ws}}$；算出來之後只乘在 Emission 和深水色上，泡沫浮在水面上，不乘。**
+
+下面依序展開：Fresnel Effect node 算的是什麼、和 Schlick 差在哪；normal 為什麼要接含細波紋的那一個；乘在哪幾項上，代入之後是什麼樣子。
+
+### Fresnel Effect node
+
+**Fresnel Effect** (Create Node > Math > Vector > Fresnel Effect) 算的就是 $F_{\text{r}}$：
+
+| 埠 | 型別 | 用途 |
+| --- | --- | --- |
+| Normal | Vector 3 | 表面 normal，world space。不接時是 mesh 的 normal (大波浪) |
+| View Dir | Vector 3 | 從表面指向攝影機的方向 $-i$，world space。不接時就是這個 |
+| Power | Float | 次方，預設 1 |
+| Out | Float | 0 到 1 |
+
+依 node 的產生碼，Normal 接 $\mathbf{n}_{\text{ws}}$、Power 記作 $\gamma$ 時：
+
+$$F_{\text{r}} = \big(1 - \operatorname{saturate}(-\,i \cdot \mathbf{n}_{\text{ws}})\big)^{\gamma} = (1 - \cos\theta)^{\gamma}$$
+
+```hlsl 對照：Fresnel Effect node 的產生碼
+Out = pow((1.0 - saturate(dot(normalize(Normal), ViewDir))), Power);
+```
+
+和 Schlick 比，它少了 $F_{\text{r}}(0)$：正俯視時是 0，不是 0.02。水的 $F_{\text{r}}(0)$ 只有 0.02，補上它只讓 $1 - F_{\text{r}}$ 少 2%，看不出來，所以不補。
+
+Power 用 **4**，和 Lit 反射用的次方相同。代入上一步 Smoothness 0.9 的 $F_{\text{lit}}$，合計是：
+
+$$(1 - F_{\text{r}}) + F_{\text{lit}} = \big(1 - (1 - \cos\theta)^4\big) + 0.04 + 0.9\,(1 - \cos\theta)^4 = 1.04 - 0.1\,(1 - \cos\theta)^4$$
+
+$(1 - \cos\theta)^4$ 在 0 到 1 之間，所以合計一直在 0.94 到 1.04 之間：反射升多少，透過去的就降多少 ([第二步](#第二步：算出反射和透過各佔多少)的圖右)。這個值開成 Property `FresnelPower`，讓你調風格：越小，越靠近腳邊就開始像鏡子。
+
+### normal 用含細波紋的那一個
+
+Lit 算反射用的是 $\mathbf{n}_{\text{ws}}$ ([第一步](#第一步：找出水面上的天空色從哪來))。$F_{\text{r}}$ 要用同一個 normal，反射變強的像素才剛好是背景變弱的像素。Fresnel Effect 要 world space 的 normal，graph 裡已經有：[Refraction 第六步](refraction.html#第六步：讓大浪也偏折)放在主 graph 的 Transform (From Tangent、To World、Type Normal)，輸出就是 $\mathbf{n}_{\text{ws}}$，直接接過來。
+
+### 只乘在從水裡出來的光上
+
+上一步回顧的合成裡，從水裡出來的有兩樣，泡沫不是：
+
+1. Emission $E$ (水後方的畫面)：乘 $1 - F_{\text{r}}$。
+2. Base Color 裡的 $\alpha\,C_{\text{deep}}$：深水的顏色是光進到水裡、散射回來的，也是從水裡穿出來的，乘 $1 - F_{\text{r}}$。它在 Base Color 裡，只影響 $\mathcal{L}_{\text{diff}}$；$\mathcal{L}_{\text{env}}$、$\mathcal{L}_{\text{sun}}$ 不看 Base Color，所以反射不會跟著變弱。
+3. 泡沫：浮在水面上，不是透過水面看到的，不乘。
+
+$$C_{\text{out}} = (1 - F_{\text{r}})\,\tau\,(1 - f)\,C_{\text{tint}}\,C_{\text{scene}} + \mathcal{L}\big(\operatorname{lerp}((1 - F_{\text{r}})\,\alpha\,C_{\text{deep}},\ C_{\text{foam}},\ f)\big)$$
+
+$\tau$、$\alpha$、$f$、$C_{\text{tint}}$ 和上一章相同。沒有泡沫處代入幾個角度，$F_{\text{r}} = (1 - \cos\theta)^4$、$F_{\text{lit}} = 0.04 + 0.9\,(1 - \cos\theta)^4$：
+
+| 位置 | $\theta$ | $F_{\text{r}}$ | 從水裡出來的 $1 - F_{\text{r}}$ | Lit 的反射 $F_{\text{lit}}$ | 看起來 |
+| --- | --- | --- | --- | --- | --- |
+| 正俯視 | 0° | 0 | 1 | 0.04 | 和上一章完全相同 |
+| 3 公尺外 | 60° | 0.06 | 0.94 | 0.10 | 大致看得穿，合計接近 1 |
+| 20 公尺外 | 85° | 0.69 | 0.31 | 0.67 | 大半是倒影 |
+| 貼著水面 | 90° | 1 | 0 | 0.94 | 只剩 Lit 的反射與 specular：鏡子 |
+
+泡沫處 $f = 1$：Base Color 是 $C_{\text{foam}}$，沒有乘 $1 - F_{\text{r}}$，所以任何角度泡沫都照樣是白的。
+
+### 接線
+
+1. 建立 Property
+
+   Blackboard **+** > **Float**：Name `FresnelPower`、Mode **Slider** (Min 1、Max 10)、Default Value **4**、Scope **Per Material**、Show In Inspector 勾選。確認 Reference 是 `_FresnelPower`。
+
+2. 加入 node
+
+   <ex-fig of="fresnel-reflection-graph" caption="這一步的 graph。綠框是新加或改接的 node 與線" />
+
+   | node | 設定 | 輸入接什麼 | 算出 |
+   | --- | --- | --- | --- |
+   | Fresnel Effect | | Normal ← Transform (Refraction 第六步的，已有)；View Dir 不接；Power ← FresnelPower | $F_{\text{r}}$ |
+   | One Minus | | In ← Fresnel Effect | $1 - F_{\text{r}}$ |
+   | Multiply「Emission × (1 − F_r)」 | | A ← Multiply「Emission」(上一章接 Emission 的那個)；B ← One Minus | $(1 - F_{\text{r}})\,E$ |
+   | Fragment 的 Emission | | ← Multiply「Emission × (1 − F_r)」(取代原本的線) | |
+   | Multiply「水自身 × (1 − F_r)」 | | A ← Multiply「水自身」($\alpha\,C_{\text{deep}}$)；B ← One Minus | $(1 - F_{\text{r}})\,\alpha\,C_{\text{deep}}$ |
+   | Lerp「泡沫色」(已有) | | A ← Multiply「水自身 × (1 − F_r)」(取代原本的線)；B、T 不變 | Base Color 的值 |
+
+3. 按 Save Asset
+
+```hlsl 對照：這一步的 node 等於這幾行
+float3 nWS = TransformTangentToWorld(rippleNormal, tangentToWorld);   // Transform (Tangent → World, Normal)，已有
+float Fr = pow(1 - saturate(dot(normalize(nWS), viewDirWS)), FresnelPower);
+emission *= 1 - Fr;
+float3 baseColor = lerp((1 - Fr) * alpha * DeepColor.rgb, FoamColor.rgb, f);
+```
+
+### 現在應該看到
+
+- 壓低攝影機看向對岸：遠處的水面像鏡子，映出天空，看不到湖底；越近越透，腳邊看得到湖底和魚。淺水不再比岸上亮。
+- 鏡子和透明的交界跟著細波紋閃動，不是一條平滑的線。
+- 俯視時和上一章一樣：淺水見底、越深越暗，水下跟著波紋扭曲。
+- 遠處的泡沫照樣是白的。
+- 在 Material 上把 FresnelPower 改成 2：較近的水也開始像鏡子，中間的距離變暗一些 (透過去的變少了，Lit 的反射沒變)。改成 8：只有很遠的水像鏡子，中間的距離稍亮。看完改回 4。
+- 鏡子裡映的只有天空，沒有湖岸。
+
+<ex-fig of="fresnel-mirror-far-clear-near-check" caption="示意：攝影機壓低、看向對岸" />
+
+| 看到的現象 | 原因通常是 | 怎麼修 |
+| --- | --- | --- |
+| 和原本一樣 | Emission block 還接著原本的 Multiply | 改接新的 Multiply |
+| 腳邊一片暗，看不到湖底；遠處仍然又亮又白 | 乘的是 $F_{\text{r}}$，少了 One Minus | 補上 One Minus |
+| 遠處的泡沫變淡或不見 | 新的 Multiply 接在 Lerp「泡沫色」之後 | 改成乘在 $\alpha\,C_{\text{deep}}$ 上，再進 Lerp |
+| 交界是一條平滑的線，不跟著細波紋閃 | Fresnel Effect 的 Normal 沒接 Transform | 接 Refraction 第六步的 Transform |
+| 整片都像鏡子，連俯視也看不透 | Power 是 0 或很小 | Default Value 填 4 |
+
+這一步做完，低角度像鏡子、俯視看得穿，兩份光的合計回到 1。但鏡子裡映的只有天空：$C_{\text{env}}$ 取自天空盒的 cubemap ([第一步](#第一步：找出水面上的天空色從哪來))，湖岸和石頭不在那張照片裡。反射的比例已經對了，要換的只剩照片本身，所以下一步在湖上另外拍一張含湖岸的 cubemap，讓水面改用它。
+
+## 第四步：讓倒影裡出現湖岸
+
+### 換一張拍到湖岸的 cubemap
+
+**在湖上放一個 Reflection Probe，從那裡往六個方向拍一張含湖岸和石頭的 cubemap；範圍內的水面，$C_{\text{env}}$ 改從這張取。比例 $F_{\text{lit}}$ 不變，只換照片，所以 graph 不用改。**
+
+### Reflection Probe
+
+**Reflection Probe** 是放在 Scene 裡的一個點：從那裡往六個方向拍下周圍的東西，做成自己的 cubemap。它有一個盒子形的範圍，範圍內的東西改用它的 cubemap，範圍外的照舊用天空盒。
+
+「範圍內」是以整個物件還是逐像素判斷，由 URP Asset 的 Lighting > Reflection Probes 區塊裡的 **Probe Blending** 決定：
+
+<iframe src="../_diagram/interactive/probe-blending/index.html" title="Probe Blending 關和開，船上每一點用哪張 cubemap？" style="height:420px"></iframe>
+
+關掉時，依物件的 bounding box 挑一個 probe，整個物件用同一張，跨過邊界時整張換掉；打開時每個像素各自混合，盒子內緣那一段 Blend Distance 越靠邊，越換成另一個 probe 或天空盒。這個練習只有一片水和一個 probe，範圍蓋住整片水面，兩種設定看起來幾乎一樣，所以不用改。
+
+用 **Baked** 類型：在編輯器裡拍一次存起來，執行時幾乎不花成本；只拍得到標成 Reflection Probe Static 的 GameObject。水面不是 static，不會拍進去。
+
+### 放一個 probe
+
+1. 把湖岸和石頭標成 static
+
+   選取 `Terrain` 和你擺的所有石頭，Inspector 右上角 **Static** 旁的下拉選單，只勾 **Reflection Probe Static**。
+
+2. 建立 probe
+
+   在 `Lake` 底下 GameObject > Create Empty，命名 `LakeReflectionProbe`，Position **(0, 0.3, 0)**。Inspector 的 **Add Component** > Rendering > **Reflection Probe**。
+
+   | 欄位 | 值 | 為什麼 |
+   | --- | --- | --- |
+   | Type | Baked | |
+   | Box Size | (60, 10, 60) | 範圍蓋住整片 60 公尺見方的水面 |
+
+   Position 的 Y 放在水面上一點：水面的倒影取的是 cubemap 裡往上的方向，而湖岸只比水面高 1 公尺。probe 放得比岸高，湖岸會落在它的地平線以下，倒影裡就看不到。
+
+3. 按 probe Inspector 底部的 **Bake**
+
+   Project 視窗裡 `Lake.unity` 旁邊多了一個同名資料夾，存著拍好的 cubemap。這是 Unity 自動建的，不要移動或刪除。
+
+之後改了光、地形或石頭，要再按一次 Bake。
+
+probe 只在湖心拍一張，水面上每一點都當作從湖心看出去，所以倒影的位置不精確，石頭的倒影不會剛好在石頭底下。湖岸這種圍成一圈的東西看起來最自然。
+
+### 現在應該看到
+
+- 攝影機貼近水面 (0.5 公尺以內) 看遠處：倒影的最上緣，天空底下多了一條暗帶，是湖岸的倒影。攝影機升高後，這條帶子很快看不到。
+- 俯視時沒有變化。
+
+這個練習 Scene 的岸很低，所以差別很小；岸上有樹、山壁時才明顯。
+
+<ex-fig of="reflection-shore-dark-band-check" caption="示意：攝影機貼近水面、看向對岸" />
+
+| 看到的現象 | 原因通常是 | 怎麼修 |
+| --- | --- | --- |
+| 沒有暗帶，只有天空 | 湖岸、石頭沒標 Reflection Probe Static；或沒按 Bake | 照步驟做；仍沒有見「請回報」 |
+| 倒影的大半變成地面的顏色 | probe 的 Y 放在水面下 | Position 改成 (0, 0.3, 0)，重新 Bake |
+
+## 第五步：認識太陽的 specular
+
+### 剩下的那個亮點
+
+**[第一步](#第一步：找出水面上的天空色從哪來)把 environment reflection 關掉之後還留著的太陽亮點，是 Lit 對太陽算的 specular reflection，也就是[第二步](#第二步：算出反射和透過各佔多少)拆出來的 $\mathcal{L}_{\text{sun}}$。它不看 Base Color，所以[第三步](#第三步：讓透過水面的部分隨角度變弱)乘的 $1 - F_{\text{r}}$ 碰不到它；要調水面的閃光，得知道控制它的是 Smoothness 和 RippleStrength 兩個參數。graph 不用改。**
+
+### 兩個參數怎麼控制它
+
+Lit 在「太陽 (Scene 的 Directional Light) 的光被表面反彈後剛好射進攝影機」的像素上，加一塊亮光：
+
+| 參數 | 控制什麼 | 調大 | 調小 |
+| --- | --- | --- | --- |
+| Smoothness | 每一塊亮光的大小 | 小而亮、銳利 | 大而暗、模糊 |
+| RippleStrength | 細波紋讓 normal 歪多少 | 碎成很多小亮點，散得更開 | 碎點變少；0 時是一條光滑的亮帶 |
+
+細波紋讓每個像素的 normal 各歪一點，各自把太陽反彈到稍微不同的方向，只有剛好對準攝影機的那些點亮起來，所以 specular 是碎的。Smoothness 越高，對得要越準才亮，亮點就越小。
+
+<ex-fig of="sun-specular-smoothness-ripple" caption="示意：同一個太陽，兩個參數各改一次" />
+
+這兩個參數不只管 specular：Smoothness 也決定 environment reflection 清不清楚，RippleStrength 也決定水下扭曲多少、鏡子的交界閃得多碎。
+
+### 動手看
+
+1. 把太陽轉到低角度
+
+   選取 Directional Light，記下原本的 Rotation，改成 **(20, 90, 0)**。Scene 視窗攝影機放在湖的 $+x$ 那一側、離水面約 2 公尺，往 $-x$ 看向太陽。
+
+2. 在 `SO_LakeWater` 改兩個參數
+
+   Smoothness 改成 0.97，再改成 0.7；RippleStrength 改成 0，再改成 2。看完都改回 (0.9、1)。
+
+### 現在應該看到
+
+- Smoothness 0.97：亮點變小變亮；0.7：亮點變大、變暗、糊開，遠處的天空倒影也變糊。
+- RippleStrength 0：一條光滑的亮帶；2：碎得更細、散得更開，水下也晃得更厲害。
+
+<ex-fig of="sun-specular-sparkle-check" caption="示意：攝影機壓低、面向太陽" />
+
+| 看到的現象 | 原因通常是 | 怎麼修 |
+| --- | --- | --- |
+| 改了沒有變化 | 改到 Material 上的值 | 改 `SO_LakeWater` |
+| 看不到 specular | 攝影機沒有面向太陽，或 Directional Light 沒轉 | 照「把太陽轉到低角度」 |
+
+看完把 Directional Light 的 Rotation 改回原本的值。
+
+到這裡，水面上的每一份光都有了來源：environment reflection 由 Lit 乘上 $F_{\text{lit}}$ 加上去，從水裡出來的光乘上 $1 - F_{\text{r}}$ 讓位，太陽的 specular 由 Smoothness 和 RippleStrength 控制；shader 的部分完成了。但[第三步](#第三步：讓透過水面的部分隨角度變弱)的新參數 FresnelPower 只在 Material 上，而這套水的參數都由設定資產寫進 Material，所以最後一步把它搬進設定資產。
+
+## 第六步：把新參數搬進設定資產
+
+### WaterSettings.cs：新增欄位
+
+和前幾章一樣，參數的來源是設定資產。在 Material 上調過的 FresnelPower 先記下來，掛上新程式後會被蓋掉。
+
+完整檔案在 教材 GitHub repo 的 [`Assets/Water/Scripts/WaterSettings.cs`](https://github.com/RogelioKG/explain-waterbody/blob/main/urp-water/unity/Assets/Water/Scripts/WaterSettings.cs)。新增的部分 (`…` 是沒變的部分)：
+
+```csharp Assets/Water/Scripts/WaterSettings.cs 這一章新增的部分
+public const float MinFresnelPower = 1f;
+…
+public float refractionStrength = 0.25f; // 折射的強度：水下的畫面跟著水面的傾斜偏移多少，0 是不扭曲
+public float fresnelPower = 4f;         // 越小，越靠近腳邊就開始像鏡子；4 和 URP Lit 的反射一致
+…
+// graph 裡算 pow(1 − cosθ, FresnelPower)：0 時結果沒有定義，小於 1 也沒有用處，下限 1。
+public float FresnelPower => Mathf.Max(fresnelPower, MinFresnelPower);
+```
+
+讀取時至少是 1：Power 是 0 時 `pow` 的結果沒有定義；小於 1 時連接近正俯視的水都會明顯反光，看不透。類別開頭的註解也改成現在的內容。
+
+### WaterBody.cs：寫進 Material
+
+```csharp Assets/Water/Scripts/WaterBody.cs 這一章新增的部分
+static readonly int FresnelPowerId = Shader.PropertyToID("_FresnelPower");
+
+void WriteMaterial()
+{
+    …
+    material.SetFloat(RefractionStrengthId, settings.RefractionStrength);
+    material.SetFloat(FresnelPowerId, settings.FresnelPower);
+}
+```
+
+ID 的名字就是[第三步](#第三步：讓透過水面的部分隨角度變弱)建立的 Property 的 Reference。時間、bounds、陡度警告的部分沒有改。
+
+### 現在應該看到
+
+- `SO_LakeWater` 的 Inspector 在 Refraction Strength 下面多了 Fresnel Power，值是 4。
+- `M_LakeWater` Material 上的 FresnelPower 和設定資產一致；直接改 Material，馬上被蓋回。
+- 在設定資產把它改成 2：較近的水也開始像鏡子。看完改回 4。
+
+<ex-fig of="fresnel-settings-inspector" caption="示意：SO_LakeWater 的 Inspector (只畫最後幾個欄位)" />
+
+| 看到的現象 | 原因通常是 | 怎麼修 |
+| --- | --- | --- |
+| 改設定資產沒反應 | graph Property 的 Reference 不是 `_FresnelPower` | 對照 Reference |
+| 掛上新程式後，不太遠的水也像鏡子 | 設定資產的新欄位是 0，讀取時被修正成 1 | 填入 4 |
+| Console 紅字 `does not contain a definition for 'FresnelPower'` | `WaterSettings.cs` 沒存檔，或名字打錯 | 對照完整檔案 |
+
+## 第七步：把這一章的 node 收成 Sub Graph
+
+### 收成 SSG_Fresnel
+
+[第三步](#第三步：讓透過水面的部分隨角度變弱)的 Fresnel Effect、One Minus 合起來只做一件事：從 normal 和視線方向算出反射比例 $F_{\text{r}}$。所以和前幾章一樣收成一個 [[Sub Graph]]，主 graph 上要 $1 - F_{\text{r}}$ 就接它的 OneMinusFresnel。
+
+流程：在主 graph 放一個 **View Direction** (Create Node > Input > Geometry > View Direction，Space **World**)，接到 Fresnel Effect 的 View Dir → 選取下表的 node → 右鍵 Convert To Sub-graph → 存到 `Assets/Water/Shaders/SubGraphs/` → 照表改接口名 → Save Asset。細節見 [Depth Coloring](depth-coloring.html) 的[「第六步：把這一章的 node 收成 Sub Graph」](depth-coloring.html#第六步：把這一章的-node-收成-Sub-Graph)。
+
+| Sub Graph | 要選的 node | Inputs | Outputs |
+| --- | --- | --- | --- |
+| `SSG_Fresnel` | Fresnel Effect、One Minus (In 接著 Fresnel Effect 的那個) | NormalWS ← Transform (Tangent → World，Refraction 第六步的)<br><br>ViewDirWS ← View Direction<br><br>Power ← FresnelPower | OneMinusFresnel → Multiply「水自身 × (1 − F_r)」與 Multiply「Emission × (1 − F_r)」的 B<br><br>Fresnel (不接) |
+
+<ex-fig of="fresnel-sub-graph" caption="收成 Sub Graph 之後的 graph。藍色是 Sub Graph，綠框是這一步收成的 SSG_Fresnel、新放的 View Direction 與它們的線；Normal Strength、Transform、FresnelPower 與兩個 × (1 − F_r) 的 Multiply 留在主 graph" />
+
+- **`FresnelPower` 不選**：Property node 選到也不會被搬進去，它接進來的線變成 Power 輸入。
+- **Transform 留在主 graph**：因為 Sub Graph 只做計算、讀外部狀態的 node 從輸入接進來，而 Transform 要用 mesh 在這個像素的 tangent frame，所以不選；它的輸出變成 NormalWS 輸入。收完之後 Transform 的輸出接兩處：`SSG_Refraction_UV` 的 NormalWS、`SSG_Fresnel` 的 NormalWS。接 Normal block 的那個 Normal Strength 照舊接 Normal block 和 Transform 的 In。
+- **View Dir 要先接線**：因為 Fresnel Effect 的 View Dir 不接線時會自己讀攝影機方向，留空收進去就是藏起來的輸入，所以先接上 View Direction，轉換後它變成 ViewDirWS 輸入。View Direction (World) 輸出的就是 View Dir 不接時讀的那個已 normalize 的方向，結果和第三步相同。
+- **Fresnel 輸出要自己加**：Fresnel Effect 只接到裡面的 One Minus，轉換不會替它產生輸出。在 Output node 的 Inputs 清單按 **+** 加一項 Float，命名 `Fresnel`，接 Fresnel Effect 的 Out。$F_{\text{r}}$ 就是反射比例，接到 Base Color 預覽就能直接看到哪裡在反光；現在補上，之後不必再打開 `SSG_Fresnel`。
+
+做完之後水面和[第六步](#第六步：把新參數搬進設定資產)一樣；`SubGraphs/` 多了 `SSG_Fresnel`。
+
+## 回頭看
+
+### 接回開頭的問題
+
+開頭的問題是：低角度看遠處的淺水，湖底照樣清楚，又亮又白。一路下來：
+
+| 步驟 | 弄清楚或修掉的 | 留下的東西 |
+| --- | --- | --- |
+| [第一步](#第一步：找出水面上的天空色從哪來) | 反光從哪來 | Lit 的 environment reflection，來源是天空盒，強弱看 Smoothness |
+| [第二步](#第二步：算出反射和透過各佔多少) | 為什麼低角度反射強、湖底卻沒有讓位 | Fresnel 與 Schlick；Lit 的反射已經乘上和 $F_{\text{r}}$ 接近的 $F_{\text{lit}}$，從水裡出來的光仍是整份 |
+| [第三步](#第三步：讓透過水面的部分隨角度變弱) | 從水裡出來的光沒有隨角度變弱 | Emission 與 $\alpha\,C_{\text{deep}}$ 乘上 $1 - F_{\text{r}}$，泡沫不乘 |
+| [第四步](#第四步：讓倒影裡出現湖岸) | 倒影裡只有天空 | 一個 Baked Reflection Probe |
+| [第五步](#第五步：認識太陽的-specular) | 太陽的亮點由什麼決定 | Smoothness 管大小，RippleStrength 管碎的程度 |
+| [第六步](#第六步：把新參數搬進設定資產) | 參數只在 Material 上 | `fresnelPower` 放進 `WaterSettings`，由 `WaterBody` 寫進 Material |
+| [第七步](#第七步：把這一章的-node-收成-Sub-Graph) | 算反射比例的 node 散在主 graph 上 | `SSG_Fresnel` ($F_{\text{r}}$、$1 - F_{\text{r}}$)；兩個 × (1 − F_r) 的 Multiply 留在主 graph |
+
+### 檢查點：低角度像鏡子，俯視看得穿
+
+做對時你會看到：
+
+- 攝影機壓低看向對岸：遠處映出天空，看不到湖底；越近越透，腳邊看得到湖底。淺水不比岸上亮。
+- 貼近水面時，倒影最上緣有一條湖岸的暗帶。
+- 俯視時和上一章相同：淺水見底、越深越暗越偏藍綠，水下跟著波紋扭曲。
+- 遠處和近處的泡沫都是不透明的白色。
+- 面向太陽，specular 碎成閃動的小亮點。
+- 在 `SO_LakeWater` 改 Fresnel Power，鏡子開始的距離跟著變；直接改 Material 會被蓋回。
+- 調效果用 Scene 視窗；最後用角色的攝影機在 Game 視窗確認一次。
+- `SG_Water` 用 `SSG_Fresnel` 算 $F_{\text{r}}$，它的 OneMinusFresnel 接兩個 × (1 − F_r) 的 Multiply。
+
+<ex-fig of="reflection-overall-check" caption="示意：左兩張是預期，右兩張是最常見的兩種錯誤" />
+
+| 看到的現象 | 原因通常是 | 回到哪一步 |
+| --- | --- | --- |
+| 低角度的淺水又亮又白，看得到湖底 | Emission 沒有乘 $1 - F_{\text{r}}$ | [第三步](#第三步：讓透過水面的部分隨角度變弱) |
+| 俯視一片暗，看不到湖底 | 乘的是 $F_{\text{r}}$，少了 One Minus | [第三步](#第三步：讓透過水面的部分隨角度變弱) |
+| 遠處的泡沫不見了 | $1 - F_{\text{r}}$ 乘在泡沫色 Lerp 之後 | [第三步](#第三步：讓透過水面的部分隨角度變弱) |
+| 倒影裡沒有湖岸 | 沒標 static 或沒 Bake | [第四步](#第四步：讓倒影裡出現湖岸) |
+| 改設定資產沒反應 | Reference 名稱不一致 | [第三步](#第三步：讓透過水面的部分隨角度變弱)、[第六步](#第六步：把新參數搬進設定資產) |
+
+**對應 Final Demo**：「低角度看水面時反射天空，俯視時較透明」。這一章完成了這一條。
+
+Final Demo「水面上視角」的每一條到這裡都做完了。用下表對一次：
+
+| Final Demo (水面上視角) | 怎麼看 |
+| --- | --- |
+| 水面 mesh 本身會上下起伏，不是只靠 texture 捲動假裝在動 | 攝影機貼近水面看側面：水面的輪廓線本身在起伏 |
+| 近岸淺水偏透明、能看到水底，越深越暗、越偏藍綠色 | 從岸邊往下看：水邊線清楚見底，往湖心逐漸變暗；水面下 0.5 公尺的魚清楚，水面下 3.5 公尺的魚幾乎看不見 |
+| 岸邊與物體接觸處有白色泡沫 | 水邊線、半泡石頭周圍有邊緣不規則的白色泡沫 |
+| 透過水面看水下物體會有折射扭曲 | 貼近水面看水面下 0.5 公尺的魚與沉底的石頭：輪廓跟著細波紋晃 |
+| 低角度看水面時反射天空，俯視時較透明 | 壓低攝影機看遠處像鏡子；俯視看得到湖底 |
+
+此時你的專案裡，以下檔案應該和教材 GitHub repo 的[範例程式碼](https://github.com/RogelioKG/explain-waterbody/tree/main/urp-water/unity)相同：
+
+- `Assets/Water/Scripts/WaterMesh.cs` (這一章沒有改它)
+- `Assets/Water/Scripts/WaterSettings.cs`
+- `Assets/Water/Scripts/WaterBody.cs`
+- `Assets/Water/Shaders/GerstnerWaves.hlsl` (這一章沒有改它)
+
+`SG_Water.shadergraph`、`Assets/Water/Shaders/SubGraphs/` 裡的 Sub Graph、`M_LakeWater` Material、`SO_LakeWater` 資產、Scene 裡的 `LakeReflectionProbe` 不在 repo 裡，以這一章的 node graph、node 表與步驟為準。
+
+### 下一步
+
+- 下一章 [Caustics](caustics.html)：讓淺水的湖底出現晃動的焦散亮紋。
+
+### 請回報
+
+以下是官方文件沒有寫清楚、需要你在 Unity 裡看一眼的事：
+
+| # | 去哪裡看 | 回報什麼 |
+| --- | --- | --- |
+| 1 | [第一步](#第一步：找出水面上的天空色從哪來)：Smoothness 0.9、攝影機壓低看遠處 | 水面有沒有帶天空的顏色。沒有的話，按 Lighting 視窗底部的 Generate Lighting 之後有沒有出現 |
+| 2 | [第一步](#第一步：找出水面上的天空色從哪來)：Lighting 視窗 Environment Reflections 的 Intensity Multiplier | 原本的值；改成 0 時天空色是否消失、太陽的亮點是否還在 |
+| 3 | [第三步](#第三步：讓透過水面的部分隨角度變弱)：FresnelPower 4，眼睛離水面約 1.7 公尺站在岸邊 | 大約多遠開始像鏡子；中間距離的亮度是否自然 |
+| 4 | [第四步](#第四步：讓倒影裡出現湖岸)：Universal Renderer 的 Rendering Path；URP Asset 的 Lighting > Reflection Probes 區塊 | Rendering Path 是哪一個；Probe Blending、Box Projection 是否勾選；Bake 之後倒影裡有沒有出現湖岸的暗帶 |
+| 5 | [第四步](#第四步：讓倒影裡出現湖岸)：Static 的下拉選單 | 選項的確切名稱 (Reflection Probe Static 或其他)；水面 GameObject 的 Mesh Renderer 的 Probes > Reflection Probes 是什麼值 |
+| 6 | [第五步](#第五步：認識太陽的-specular)：接上 $1 - F_{\text{r}}$ 前後 | 太陽 specular 的亮度有沒有變 (依原始碼推論不會變) |
+| 7 | [第七步](#第七步：把這一章的-node-收成-Sub-Graph)：剛轉換完的 `SSG_Fresnel` | NormalWS、ViewDirWS 的型別是不是 Vector 3；Output node 有沒有多一項沒接線的輸出 |
+
+## 變化與延伸
+
+### 更準的反射
+
+這一章的倒影來自天空盒和一個 probe，位置不精確，水面上的船或角色也不會出現在倒影裡。要更準有兩種做法，這裡不做：
+
+- **planar reflection (平面反射)**：把攝影機對水面鏡射，從水面下再畫一次整個場景，當作倒影。倒影完全正確，代價是場景多畫一遍，大約加倍繪製成本。URP 沒有現成的 Component，要自己寫。
+- **screen space reflection (螢幕空間反射)**：從已經畫好的畫面裡找倒影，不用多畫一遍，但畫面外的東西反射不出來。URP 17.3 沒有內建。
+
+Reflection Probe 的 Type 改成 Realtime 可以讓倒影跟著場景更新，但每次更新都要從 probe 往六個方向各畫一次場景，它很耗時。湖岸不動時，Baked 就夠了。
+
+## 來源
+
+### 官方文件與原始碼
+
+縮寫：`SG` = `https://docs.unity3d.com/Packages/com.unity.shadergraph@17.3/manual`，`M` = `https://docs.unity.com/en-us/engine/6000.3/manual`，`GFX` = GitHub `Unity-Technologies/Graphics` 的 `6000.3/staging` 分支 `Packages/com.unity.render-pipelines.universal/`。
+
+- environment reflection 的來源、probe 的範圍與天空盒：`M/lighting-overview/lighting/reflection-probes/introduction`；Lighting 視窗的 Environment Reflections：`M/lighting-overview/lighting-reference/lighting-window`
+- Lit 的 Smoothness：`M/materials-and-shaders/built-in/shaders-in-universalrp/reference/lit-shader`
+- Lit 的 environment reflection 比例 (`Pow4(1 − NoV)`、0.04、grazingTerm、surfaceReduction)：`GFX/ShaderLibrary/GlobalIllumination.hlsl`、`GFX/ShaderLibrary/BRDF.hlsl`；太陽的 specular reflection：`GFX/ShaderLibrary/Lighting.hlsl`、`BRDF.hlsl`；Lit 只有 diffuse 用到 Base Color，Metallic 0 時兩種 specular 的比例從 0.04 起算 (`InitializeBRDFData`、`EnvironmentBRDF`、`LightingPhysicallyBased`)：`BRDF.hlsl`、`Lighting.hlsl`
+- Emission 直接加到最後的顏色：`GFX/ShaderLibrary/Lighting.hlsl`
+- Sub Graph 的建立與輸入輸出：`SG/Create-Sub-Graph.html`、`SG/Add-Inputs-Outputs-Sub-Graph.html`
+- Convert To Sub-graph 實際做的事 (Property node 留在外面、輸入輸出怎麼合併與命名、存檔視窗的預設資料夾)：GitHub `Unity-Technologies/Graphics` 的 `6000.3/staging` 分支 `Packages/com.unity.shadergraph/Editor/Drawing/MaterialGraphEditWindow.cs` (`ToSubGraph`)、`…/Editor/Data/SubGraph/SubGraphOutputNode.cs`
+- node：`SG/Fresnel-Effect-Node.html` (Power 的預設值 1 來自原始碼 `com.unity.shadergraph/Editor/Data/Nodes/Math/Vector/FresnelEffectNode.cs`)、`SG/Transform-Node.html`；View Direction (World) 輸出已 normalize 的方向，和 Fresnel Effect 的 View Dir 不接時相同：原始碼 `com.unity.shadergraph/Editor/Data/Nodes/Input/Geometry/ViewDirectionNode.cs`、`com.unity.render-pipelines.universal/Editor/ShaderGraph/Templates/SharedCode.template.hlsl` (`GetWorldSpaceNormalizeViewDir`)
+- Reflection Probe 的建立、類型、欄位、Bake：`M/lighting-overview/reflections/using-reflection-probes`、`…/reflections/ref-probe-types`、`…/reflections/class-reflection-probe`
+- URP 17.3 沒有內建 screen space reflection 與 planar reflection Component：在 URP 原始碼與 6.2、6.3 的 What's new 中都沒有找到
+- 水的 $F_{\text{r}}(0) \approx 0.02$ 是由折射率 1.33 代入 Schlick 的式子算出，官方文件沒有寫
+</script>
+<script>
+explainer({
+  title: 'Reflection',
+  assumes: ['Unity 編輯器的基本操作 (看完 Unity Learn 的 Basic 與 Creative Core)', { t: 'Vector Math (reflection vector)', href: 'vector-math.html' }, { t: 'Shader Graph', href: 'shader-graph.html' }, { t: 'Flow Normals (細波紋 normal、Smoothness)', href: 'flow-normals.html' }, { t: 'Refraction (做完的湖)', href: 'refraction.html' }, { t: 'URP Waterbody (總覽)', href: 'urp-water.html' }],
+  approach: '重新發明：先看 Lit 已經在做什麼，再由「低角度的淺水又亮又白」帶出 Fresnel，補上缺的那一份',
+  env: 'Windows 11、Unity 6000.3.20f1 (英文介面)、URP 17.3、Shader Graph 17.3',
+  terms: {
+    'environment reflection': 'URP Lit 依 normal 算出視線反彈的方向，到周圍環境的 cubemap 取那個方向的顏色，加到表面上',
+    'cubemap': '從一點往六個方向各拍一張、拼成盒子的 texture；用方向查顏色',
+    'Fresnel': '光碰到兩種介質的交界時，反射的比例隨視線和 normal 的夾角改變：越貼近掠射，反射越多',
+    'Sub Graph': '把一串 node 存成一個資產，在 graph 裡變成一個 node；Blackboard 的 Property 是它的輸入，Output node 收它的輸出',
+  },
+});
+</script>
+</body>
+</html>

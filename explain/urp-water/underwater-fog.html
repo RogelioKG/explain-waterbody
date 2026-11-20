@@ -1,0 +1,837 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Underwater Fog and Visibility</title>
+<script src="../_explainer/explainer.js"></script>
+</head>
+<body>
+<script type="text/markdown" id="ex-content">
+## 這一章要解決的問題
+
+### 潛到水下，看到的還是岸上的樣子
+
+做完 [Wave Height Query](wave-height-query.html)，從水面上看湖已經完整，C# 也查得到任一點的水面高度。現在用 Scene 視窗的攝影機 (按住右鍵加 WASD) 穿過水面潛到水下：湖底、石頭、遠處的魚全都清清楚楚，像站在空氣裡一樣；抬頭還看得到天空。從水面上看，清澈度 5 公尺的湖，5 公尺深的湖底就看不見了；潛到水下，5 公尺外的魚卻一樣清楚，兩邊對不上。
+
+這一章對應 Final Demo「水面下視角」的前兩條：
+
+> 潛進水裡後，畫面換成水下色調，加上距離霧
+>
+> 遠處的魚和物體逐漸看不清，近處清楚
+
+做完後，攝影機一沒入水面，畫面就換成水的顏色：伸手可及的魚看得出原本的顏色，越遠越暗、越偏水色，到了清澈度那麼遠的地方完全融進深水色；浮出水面又恢復原樣。水下的顏色與能見距離來自同一份設定資產 `SO_LakeWater`：調一個 Clarity，岸上看到的深淺和水下魚消失的距離一起變。
+
+這一章只處理攝影機整個在水面下的情形；從水下往上看水面、攝影機半入水時的分界線不在這一章。
+
+### 這一章怎麼走
+
+| 步驟 | 做什麼 | 接下來要處理的 |
+| --- | --- | --- |
+| [第一步](#第一步：在畫好的畫面上再畫一層) | 物體畫完後，再對整個畫面跑一次 shader：Fullscreen Shader Graph 加上 render pass 與 Renderer Feature 兩段 C#，先只染一層色 | 遠近染成同一個顏色 |
+| [第二步](#第二步：越遠，霧越濃) | 依視線在水裡走的距離算透光率，用水面的同一套混色加霧 | 攝影機在水面上也有霧；霧的參數和水面的不同步 |
+| [第三步](#第三步：只在水下，用所在那片湖的參數) | 攝影機在水下才加霧，參數取自所在那片湖的設定資產 | |
+
+每一步之後都有「現在應該看到」、預期與常見錯誤並排的示意圖，和「看到什麼、通常是哪裡錯」的對照表。示意圖多半是攝影機在水下、平視湖心的畫面：灰色是湖底與石頭，粉紅色是魚 (由近到遠約 0.7、1.5、3、6 公尺)，青色是霧。
+
+## 第一步：在畫好的畫面上再畫一層
+
+### 為什麼做成全螢幕 pass
+
+**水下的霧要讓畫面上的每個像素，依它離攝影機多遠，把原本的顏色換成水色；湖底、石頭、魚、天空都一樣。因為畫面上每樣東西都要處理，所以霧不寫進任何一個物體的 shader，而是等它們照常畫完，再對整個畫面的每個像素跑一次 shader。這一步先把這條路接通：shader 先只把畫面染一層色，染上了就表示它有在跑；另外要寫兩段 C#，因為 URP 不會自己多畫這一次，得有一段交代這次畫什麼、插在哪，再有一段每一幀把它排進 URP 的工作清單。**
+
+先看霧為什麼不寫在別的地方：
+
+- **每個物體的 shader**：湖底、石頭、魚、角色各有各的 material，每一個都要改，之後放進湖裡的新東西也得記得改。
+- **水面的 shader**：水面的 shader 只在畫面上有水面的像素跑。攝影機在水下平視一條魚時，攝影機和魚之間整段都是水，沒有隔著水面，這個像素根本沒有水面要畫；往上看時看到的是水面的背面，而水面只畫正面。
+
+所以換個做法：等物體照常畫完，畫面上每個像素都有了顏色，再把整個畫面當成一張圖，每個像素算一次霧。這種一次蓋滿整個畫面的繪製叫 [[full-screen pass]] (全螢幕 pass：每個像素讀進原本的顏色，寫出新的顏色)。它不挑像素，物體的 shader 也一行都不用改。
+
+下面依序展開全螢幕 pass 要回答的三件事：插在一幀裡的哪個位置；每個像素怎麼算 (一個 Fullscreen Shader Graph)；誰把它排進一幀 (兩段 C#)。
+
+### 插在透明物件之前
+
+[Shader Basics](shader-basics.html#一整幀：誰先畫、誰後畫) 走過一幀的順序：不透明物體 → 天空 → 複製 depth texture 與 opaque texture → 透明物件 (水面)。霧要插進這串裡的某個位置：
+
+<ex-fig of="frame-render-order-underwater-fog" caption="一幀的順序 (攝影機在水下時)。綠框是這一章加的全螢幕 pass" />
+
+霧要知道每個像素離多遠。距離從 depth texture 來，而 depth texture 只記著不透明物體 (沒有東西的地方當作最遠，也就是天空)。所以：
+
+- **插在不透明物體與天空之後**：要染色的東西都已經在畫面上，depth texture 也複製好了。
+- **插在透明物件之前**：透明物件不寫深度，不在 depth texture 裡。霧如果在它們之後才做，透明物件的像素會拿到「它後面那個東西」的距離來算霧，算出來的不是它自己的。插在之前，透明物件畫在霧的上面，不被這次霧處理。
+
+現在場景裡唯一的透明物件是水面；攝影機在水下時看到的是它的背面，本來就不會畫出來 (上一節)。
+
+這個時間點在 URP 的名字是 `RenderPassEvent.BeforeRenderingTransparents`。[[RenderPassEvent]] 是 URP 列出的插入點，每個值代表一幀裡的一個位置；寫程式時用它告訴 URP 這次繪製排在哪裡。
+
+### SG_UnderwaterFog：先只染一層色
+
+每個像素怎麼算，交給專門畫全螢幕的 Shader Graph：[[Fullscreen Shader Graph]]。它和水面用的 Lit graph 不同，沒有 mesh、沒有光照，Fragment 只要接 Base Color。
+
+這一步的 shader 只要證明兩件事：讀得到霧之前的畫面，寫出的顏色也真的出現在螢幕上。所以先把畫面乘上一個偏藍綠的顏色，一眼看得出有沒有生效；霧的公式[第二步](#第二步：越遠，霧越濃)再換上。
+
+1. 建立 graph
+
+   在 `Assets/Water/Shaders/` 按右鍵 > Create > Shader Graph > URP > **Fullscreen Shader Graph**，命名為 `SG_UnderwaterFog`，打開它。graph 裡如果除了 Master Stack 還有別的 node，全部刪掉。
+
+2. Graph Settings 不動
+
+   Graph Inspector 的 Graph Settings 維持預設：Blend Mode **Disabled**、Depth Test **Disabled**、Depth Write 不勾、Allow Material Override 不勾。Blend Mode 是 Disabled，輸出的顏色直接取代原本的像素，所以 Fragment 的 Alpha 不影響結果，不用接。
+
+3. 讀出原本的畫面
+
+   新增 **URP Sample Buffer** node (Create Node 的 Input > Universal 底下)。它讀 URP 準備好的、和畫面一樣大的圖，讀哪一張由 **Source Buffer** 決定：
+
+   | Source Buffer | 讀到的 |
+   | --- | --- |
+   | NormalWorldSpace (預設) | 每個像素的 normal，這裡用不到 |
+   | MotionVectors | 每個像素的移動量，這裡用不到 |
+   | BlitSource | 全螢幕 pass 的輸入，也就是霧之前的畫面 |
+
+   把 Source Buffer 改成 **BlitSource** (介面上也可能寫成 Blit Source)。UV 不接，預設就是「這個像素自己」。它的 node 預覽是黑的：在 graph 裡沒有真正的畫面可讀，屬正常。
+
+4. 暫時染一層色
+
+   | Node | 設定 | 接線 |
+   | --- | --- | --- |
+   | URP Sample Buffer | Source Buffer：**BlitSource** | |
+   | Multiply (暫時) | B 填 (0.5, 0.8, 0.8, 1) | A ← URP Sample Buffer 的 Output |
+   | Fragment 的 Base Color | | ← Multiply |
+
+   紅色乘 0.5、綠藍乘 0.8：畫面變暗並偏藍綠，一眼看得出這個 shader 有沒有生效。[第二步](#第二步：越遠，霧越濃)會換成真正的霧。按 **Save Asset**。
+
+<ex-fig of="underwater-tint-graph" caption="第一步的 graph。標「暫時」的 node 第二步會換掉" />
+
+5. 建立材質
+
+   在 `Assets/Water/` 底下建立資料夾 `Materials`，在裡面按右鍵 > Create > **Material**，命名為 `M_UnderwaterFog`。Inspector 的 Shader 下拉選單選 **Shader Graphs/SG_UnderwaterFog**。
+
+### 兩段 C#：render pass 與 Renderer Feature
+
+shader 有了，接下來要讓 URP 在 `BeforeRenderingTransparents` 用這個材質畫一次全螢幕。URP 17 安排一幀的方式叫 [[Render Graph]]：每一幀開始時，URP 先把這一幀要做的每一次繪製 (每一個 [[render pass]]) 排成一張清單，每個 pass 宣告自己讀哪些圖、寫哪些圖；排完之後，URP 依這些宣告決定要配置哪些暫存的圖，最後才真的執行。
+
+所以自己加的繪製也要照這個方式：寫一個 pass，在排清單的階段宣告「讀目前的畫面，用霧的材質畫進另一張圖」，實際的繪製交給 URP。網路上很多教學用 `Execute`、`cmd.Blit` 這類寫法，那是 Unity 6.3 已移除的舊模式，照抄無法編譯。
+
+這一步寫兩個類別：
+
+| 類別 | 繼承 | 負責 |
+| --- | --- | --- |
+| `UnderwaterFogPass` | `ScriptableRenderPass` | 一次全螢幕繪製：插在哪、讀什麼、寫什麼 |
+| `UnderwaterFogFeature` | `ScriptableRendererFeature` | 掛在 Renderer 上；每台攝影機每一幀決定要不要把 pass 排進清單 |
+
+[[Renderer]] 是 URP Asset 底下的設定檔，決定一幀依什麼步驟畫出來；[[Renderer Feature]] 是加在 Renderer 上的外掛，可以往這些步驟裡插入自己的 pass。
+
+分成兩個類別，因為「這次畫什麼」和「這一幀要不要畫」是兩件事：pass 只管前者，每一幀都一樣；feature 每台攝影機每一幀都會被問一次，[第三步](#第三步：只在水下，用所在那片湖的參數)就在這裡判斷攝影機在不在水下。URP 內建的 Full Screen Pass Renderer Feature 也能畫全螢幕，但做不到這種逐台攝影機的判斷 (見[「內建的 Full Screen Pass Renderer Feature」](#內建的-Full-Screen-Pass-Renderer-Feature))，所以這裡自己寫。
+
+### Water.asmdef 加上 URP 的引用
+
+`Assets/Water/` 有自己的 Assembly Definition，只能用引用清單裡的程式集。這兩個類別用到 URP 與 SRP Core 的程式碼，所以要加兩個引用：
+
+1. 選取 `Assets/Water/Water.asmdef`
+2. Inspector 的 **Assembly Definition References** 按 **+** 兩次，分別選 `Unity.RenderPipelines.Universal.Runtime` 與 `Unity.RenderPipelines.Core.Runtime`
+3. 按 **Apply**
+
+Inspector 存檔時可能把引用寫成 `GUID:` 開頭的一串字，和 repo 裡直接寫名稱的版本等價。
+
+### UnderwaterFogPass.cs
+
+在 `Assets/Water/Scripts/` 建立 `UnderwaterFogPass.cs`：
+
+```csharp Assets/Water/Scripts/UnderwaterFogPass.cs UnderwaterFogPass (第一步的版本)
+using UnityEngine;
+using UnityEngine.Rendering;
+using UnityEngine.Rendering.RenderGraphModule;
+using UnityEngine.Rendering.RenderGraphModule.Util;
+using UnityEngine.Rendering.Universal;
+
+namespace Water
+{
+    public class UnderwaterFogPass : ScriptableRenderPass
+    {
+        const string PassName = "Underwater Fog";
+
+        Material material;
+
+        public UnderwaterFogPass()
+        {
+            // 不透明物體與天空已經畫完、深度貼圖已經複製；透明物件 (水面) 還沒畫
+            renderPassEvent = RenderPassEvent.BeforeRenderingTransparents;
+        }
+
+        // 每一幀加入之前由 feature 呼叫
+        public void Setup(Material fogMaterial)
+        {
+            material = fogMaterial;
+            // 要讀目前的畫面，畫面必須是一張中介貼圖 (不能直接讀 back buffer)
+            requiresIntermediateTexture = true;
+        }
+
+        public override void RecordRenderGraph(RenderGraph renderGraph, ContextContainer frameData)
+        {
+            UniversalResourceData resourceData = frameData.Get<UniversalResourceData>();
+            // requiresIntermediateTexture 為 true 時不會發生，保險
+            if (resourceData.isActiveTargetBackBuffer)
+            {
+                return;
+            }
+
+            // 來源是目前的畫面；目的地是同樣大小、同樣格式的新貼圖 (同一張不能同時讀和寫)
+            TextureHandle source = resourceData.activeColorTexture;
+            TextureDesc desc = renderGraph.GetTextureDesc(source);
+            desc.name = "CameraColor-UnderwaterFog";
+            desc.clearBuffer = false;
+            TextureHandle destination = renderGraph.CreateTexture(desc);
+
+            // 用材質的第 0 個 pass 畫滿 destination；source 綁到 shader 的 _BlitTexture
+            RenderGraphUtils.BlitMaterialParameters blit =
+                new RenderGraphUtils.BlitMaterialParameters(source, destination, material, 0);
+            renderGraph.AddBlitPass(blit, passName: PassName);
+
+            // 之後的 pass (透明物件、後處理) 改畫在加了霧的這張上，不必再複製回去
+            resourceData.cameraColor = destination;
+        }
+    }
+}
+```
+
+逐段看：
+
+1. 建構子：排在哪裡
+
+   `renderPassEvent` 是 `ScriptableRenderPass` 的欄位，填上一節選的 `RenderPassEvent.BeforeRenderingTransparents`。建構子只在 feature 建立 pass 時執行一次。
+
+2. `Setup`：每一幀由 feature 交給它材質
+
+   [[back buffer]] 是最後顯示在螢幕上的那張圖。沒有人需要讀畫面時，URP 可能直接畫在 back buffer 上；但 back buffer 不能拿來當輸入讀。`requiresIntermediateTexture = true` 要求 URP 這一幀先畫在一張中介的貼圖上，最後才複製到 back buffer，這個 pass 才讀得到目前的畫面。代價是每一幀多一次複製，只有加了這個 pass 的幀才付。
+
+3. `RecordRenderGraph`：排清單的階段
+
+   這個函式在排清單時呼叫，只宣告要做什麼，不真的畫。
+
+   ```csharp ScriptableRenderPass.RecordRenderGraph()
+   public virtual void RecordRenderGraph(RenderGraph renderGraph, ContextContainer frameData)
+   ```
+
+   | 參數 | 型別 | 用途 |
+   | --- | --- | --- |
+   | `renderGraph` | `RenderGraph` | 這一幀的清單；往裡面加 pass、建暫存貼圖 |
+   | `frameData` | `ContextContainer` | 這一幀的資料；用 `Get<T>()` 取出需要的那一份 |
+
+   `frameData.Get<UniversalResourceData>()` 取出這一幀 URP 用到的各張圖。這裡用到的欄位：
+
+   | 欄位 | 型別 | 內容 |
+   | --- | --- | --- |
+   | `activeColorTexture` | `TextureHandle` | 目前正在畫的那張畫面 |
+   | `cameraColor` | `TextureHandle` | 攝影機的主畫面；可以改寫，之後的 pass 就畫在新指定的那張 |
+   | `isActiveTargetBackBuffer` | `bool` | 目前畫的是不是 back buffer |
+
+   [[TextureHandle]] 不是貼圖本身，而是 Render Graph 裡的一個代號：排清單時還沒有真正的貼圖，URP 執行時才把代號換成實際的貼圖。代號只在這一幀有效。
+
+4. 建立目的地貼圖
+
+   同一個 pass 不能同時讀和寫同一張圖，所以要另一張一樣的。`renderGraph.GetTextureDesc(source)` 回傳 `source` 的描述 [[TextureDesc]] (寬、高、格式等)，複製一份、改個名字 (在除錯工具裡看得到)；`clearBuffer = false` 表示不必先清空，反正每個像素都會被蓋掉。`renderGraph.CreateTexture(desc)` 照這份描述在清單裡登記一張暫存貼圖，回傳它的代號。暫存貼圖由 Render Graph 配置與回收，不用自己釋放。
+
+5. blit
+
+   [[blit]] 是把一張圖經過材質畫到另一張圖：目的地的每個像素都跑一次材質的 shader，shader 裡讀得到來源。
+
+   ```csharp RenderGraphUtils.BlitMaterialParameters 建構子、AddBlitPass()
+   public BlitMaterialParameters(TextureHandle source, TextureHandle destination, Material material, int shaderPass)
+   public static IBaseRenderGraphBuilder AddBlitPass(this RenderGraph graph, RenderGraphUtils.BlitMaterialParameters blitParameters, string passName = …, bool returnBuilder = false)
+   ```
+
+   | 參數 | 用途 |
+   | --- | --- |
+   | `source` | 來源；綁到 shader 的 `_BlitTexture`，也就是 URP Sample Buffer 的 BlitSource 讀的那張 |
+   | `destination` | 目的地，整張被畫滿 |
+   | `material` | `M_UnderwaterFog`；blit 不會改動它 |
+   | `shaderPass` | 用材質的第幾個 pass；Fullscreen Shader Graph 的第 0 個就是畫全螢幕用的 |
+   | `passName` | 這個 pass 在除錯工具裡顯示的名字 |
+
+   `AddBlitPass` 把這次 blit 加進清單。
+
+6. 換掉 `cameraColor`
+
+   霧畫在 `destination`，原本的畫面還是沒有霧的。與其再 blit 回去，不如直接告訴 URP：從現在起攝影機的主畫面是 `destination`。之後的透明物件、後處理都畫在它上面，少一次複製。
+
+<ex-fig of="blit-camera-color-swap" caption="blit 之後，cameraColor 改指新的那張" />
+
+### UnderwaterFogFeature.cs
+
+在同一個資料夾建立 `UnderwaterFogFeature.cs`：
+
+```csharp Assets/Water/Scripts/UnderwaterFogFeature.cs UnderwaterFogFeature (第一步的版本)
+using UnityEngine;
+using UnityEngine.Rendering.Universal;
+
+namespace Water
+{
+    public class UnderwaterFogFeature : ScriptableRendererFeature
+    {
+        [SerializeField] Material fogMaterial;   // M_UnderwaterFog
+
+        UnderwaterFogPass pass;
+
+        // 載入、啟用、在 Inspector 改值時呼叫
+        public override void Create()
+        {
+            pass = new UnderwaterFogPass();
+        }
+
+        // 每台攝影機每一幀呼叫一次
+        public override void AddRenderPasses(ScriptableRenderer renderer, ref RenderingData renderingData)
+        {
+            if (fogMaterial == null)
+            {
+                return;
+            }
+            // 材質預覽與 Reflection Probe 烘焙用的攝影機不加霧；Scene 視窗的攝影機要加
+            CameraType cameraType = renderingData.cameraData.cameraType;
+            if (cameraType == CameraType.Preview || cameraType == CameraType.Reflection)
+            {
+                return;
+            }
+
+            pass.Setup(fogMaterial);
+            renderer.EnqueuePass(pass);
+        }
+    }
+}
+```
+
+`ScriptableRendererFeature` 要覆寫兩個函式：
+
+| 函式 | 什麼時候呼叫 | 這裡做什麼 |
+| --- | --- | --- |
+| `Create()` | feature 載入、啟用、在 Inspector 改值時 | 建立 pass。只建一次，不要每一幀 `new` |
+| `AddRenderPasses(renderer, ref renderingData)` | 每台攝影機、每一幀一次 | 決定這台攝影機這一幀要不要加 pass；要就呼叫 `renderer.EnqueuePass(pass)`。官方說明不要在這裡建立資源 |
+
+- `fogMaterial` 是 `[SerializeField]`，所以 Renderer 的 Inspector 上會出現 **Fog Material** 欄位。沒指定時直接 return，畫面照常。
+- `renderingData.cameraData.cameraType` 是這台攝影機的種類 ([[CameraType]])。Game 視窗的攝影機是 `Game`，Scene 視窗的是 `SceneView`，兩者都要加；Project 視窗與 Inspector 裡的材質預覽球用的是 `Preview`，Reflection Probe 烘焙時 Unity 用 `Reflection` 類型的攝影機拍周圍，這兩種不加。不略過 `Reflection` 的話，重新烘焙 `LakeReflectionProbe` 時霧也會被拍進反射裡。
+
+### 加進 Universal Renderer
+
+1. 找到 Renderer
+
+   在 Project 視窗點選 URP Asset (打開 Depth Texture 的那幾個)，Inspector 的 **Renderer List** 列著它用的 Renderer。點一下那個欄位，Project 視窗會標出 Renderer 資產，選取它。有好幾個 URP Asset、各用不同的 Renderer 時，下面的步驟每個 Renderer 都做一次。
+
+2. 加入 feature
+
+   Renderer 的 Inspector 最下面按 **Add Renderer Feature**，選 **Underwater Fog Feature** (以類別名稱列出)。把 `M_UnderwaterFog` 拖進新出現的 **Fog Material** 欄位。
+
+3. 確認 Depth Texture Mode
+
+   同一個 Inspector 找 **Depth Texture Mode**，確認是 **After Opaques**，不是的話改成它。水面在畫的時候要讀 depth texture；選 After Transparents 時，depth texture 要等透明物件畫完才複製，攝影機在水面上時水面就讀不到這一幀的深度。
+
+### 現在應該看到
+
+- Scene 視窗與 Game 視窗的整個畫面都變暗、偏藍綠，攝影機在水上水下都一樣。
+- 遠近一樣：近處的魚和遠處的魚染上同樣的顏色。
+- Renderer 的 Inspector 裡，把 Underwater Fog Feature 標題列的勾選框取消：畫面恢復原樣。勾回來。
+- Project 視窗與 Inspector 裡的材質預覽球顏色不變。
+
+<ex-fig of="underwater-tint-check" caption="示意：攝影機在水下平視湖心" />
+
+| 看到的現象 | 原因通常是 | 怎麼修 |
+| --- | --- | --- |
+| Console 紅字 `'Universal' does not exist in the namespace` | `Water.asmdef` 沒加引用，或沒按 Apply | 照上面加兩個引用 |
+| Console 紅字 `no suitable method found to override`，指向 `Execute` | 照舊教學寫了 `Execute` | 照上面的程式改成 `RecordRenderGraph` |
+| 畫面完全沒變 | feature 沒加到目前用的 Renderer、Fog Material 是空的、或 feature 被取消勾選 | 檢查 Renderer 的 Inspector |
+| 畫面變成一片奇怪的顏色，看不到場景 | URP Sample Buffer 的 Source Buffer 還是 NormalWorldSpace | 改成 BlitSource，Save Asset |
+| 畫面全黑 | Multiply 的 B 是 0，或 A 沒接 | 照表填 |
+
+到這裡，物體畫完之後多了一次全螢幕繪製：每個像素讀進霧之前的顏色，寫出新的顏色，整條路接通了。但每個像素乘的是同一個顏色，伸手可及的魚和十公尺外的魚染得一樣深。真的水裡，魚的光每穿過 1 公尺的水就被吸收固定的比例，越遠剩得越少。shader 手上已經有每個像素原本的顏色，缺的只是這個像素離攝影機多遠；而 pass 排在 depth texture 複製好之後，距離讀得到。所以下一步由 depth texture 算出每個像素的距離，套上水面用過的透光率。(攝影機在水面上也被染，[第三步](#第三步：只在水下，用所在那片湖的參數)處理。)
+
+## 第二步：越遠，霧越濃
+
+### 霧的濃淡就是透光率
+
+**水下看一條魚，魚的光要穿過攝影機到魚之間的水才到眼睛；這和水面上湖底的光穿過一段水是同一件事，只是光走的那段水換了。所以霧不另立公式：透光率照用 Depth Coloring 的那一條，混色照用 Refraction 的水面混色，只把「水的厚度」換成「攝影機到這一點的距離」。這一步要補的是 shader 原本沒有的那個量：每個像素離攝影機多遠，由 depth texture 還原出那一點的位置，再量它到攝影機的距離。**
+
+下面依序展開：透光率怎麼隨距離變、清澈度在水下代表什麼；被吸收的光換成什麼顏色；每個像素的距離怎麼來、為什麼不用 eye depth；最後接線，並讓 pass 宣告它要讀 depth texture。
+
+### 光在水裡走了多遠
+
+[Depth Coloring](depth-coloring.html#每公尺吸收固定的比例) 算過，光每穿過 1 公尺的水就被吸收固定的比例；穿過厚度 $h$ 的水之後剩下的比例是 [[透光率]] $\tau$，[[吸收係數]] $k$ 由 [[清澈度]] $D$ 換算 ($D$ 是 $\tau$ 剩 1% 的距離)：
+
+$$\tau = e^{-kh}, \qquad k = \frac{\ln 100}{D} \approx \frac{4.605}{D}$$
+
+在水面上，$h$ 是視線從水面走到湖底的那一段，也就是水的厚度。在水下，攝影機和魚之間整段都是水，光在水裡走的長度就是攝影機到魚的距離，記作 $d$。因為兩者都是光在水裡走的長度，所以把 $h$ 換成 $d$：
+
+$$\tau = e^{-kd}$$
+
+| 符號 | 意思 |
+| --- | --- |
+| $d$ | 光在水裡走的距離：攝影機到這個像素上那一點的距離，公尺 |
+| $D$ | 清澈度，設定資產的 Clarity；預設 5 公尺 |
+| $k$ | 吸收係數，和水面用的同一個；$D = 5$ 時 $k = 4.605 / 5 \approx 0.921$ |
+
+清澈度 5 公尺時，代入 $\tau = e^{-0.921\,d}$：
+
+| 魚離攝影機 $d$ | $\tau$ | 看起來 |
+| --- | --- | --- |
+| 0.5 m | $e^{-0.46} \approx 63\%$ | 看得清，顏色稍暗 |
+| 1 m | $e^{-0.92} \approx 40\%$ | 看得出是魚，但顏色已暗、偏灰褐 |
+| 2.5 m | $e^{-2.30} \approx 10\%$ | 水色裡一個暗影 |
+| 5 m | $e^{-4.61} \approx 1\%$ | 看不見 |
+| 10 m | $e^{-9.21} \approx 0.01\%$ | 看不見 |
+
+$D$ 的定義是「透光率剩 1% 的距離」：在水面上，它是從上方看多深之後看不到底；在水下，同一個數字是魚完全消失的距離。所以不必另外加一個能見距離的參數，水下直接用 Clarity。
+
+魚完全消失之前，早就看不清了。把「魚的顏色留下一半以上」當作大致看得清：
+
+$$\tau \ge 0.5 \iff e^{-4.605\,d/D} \ge 0.5 \iff d \le \frac{D \ln 2}{4.605} \approx 0.15\,D$$
+
+預設 $D = 5$ 時，$0.15 \times 5 \approx 0.75$ 公尺：水下是相當混濁的水。要讓 2 公尺內的魚大致看得清，$D \ge 2 / 0.15 \approx 13$ 公尺；$D = 15$ 時，看得清的範圍約 $0.15 \times 15 \approx 2.3$ 公尺，7.5 公尺處 $\tau = e^{-4.605 \times 7.5 / 15} \approx 10\%$，只剩暗影，15 公尺消失。清澈度同時決定水面上的深淺，調大後岸上看湖也會一起變清。
+
+<iframe src="../_diagram/interactive/clarity-two-views/index.html" title="同一個清澈度，水面上的深淺與水下的能見距離怎麼一起變？" style="height:500px"></iframe>
+
+### 被吸收的光換成水色
+
+光被吸收掉的那 $1 - \tau$，換成水本身散射出來的顏色。水面已經有一套這樣的混色：[Refraction](refraction.html#新的混色：背景放-Emission，水自己的顏色放-Base-Color) 把水面後方的畫面 $C_{\text{scene}}$ 乘上 $\tau$ 並染色，再加上打過光的深水色。沒有泡沫的地方，它是：
+
+$$C_{\text{out}} = \tau\,C_{\text{tint}}\,C_{\text{scene}} + \mathcal{L}(\alpha\,C_{\text{deep}}), \qquad C_{\text{tint}} = \operatorname{lerp}(\mathbf{1},\ C_{\text{shallow}},\ \alpha), \qquad \alpha = \operatorname{saturate}(1 - \tau)$$
+
+| 符號 | 意思 |
+| --- | --- |
+| $C_{\text{scene}}$ | 水面後方的畫面：不透明物體與天空，沒有水面 |
+| $C_{\text{tint}}$ | 穿過水的光被染上的顏色：近處是白色 $\mathbf{1}$ (不染色)，越遠越偏淺水色 |
+| $C_{\text{shallow}}$、$C_{\text{deep}}$ | 淺水色、深水色：graph 的 Property `ShallowColor`、`DeepColor`，值來自設定資產 |
+| $\alpha$ | 水擋掉的比例，`SSG_Absorption` 的 Opacity |
+| $\mathcal{L}(\cdot)$ | 打光：給它 Base Color，它還你 URP Lit 打過光的顏色 |
+
+全螢幕 pass 照用這條式子，改兩處：
+
+1. $C_{\text{scene}}$ 改從 BlitSource 讀
+
+   水面的 shader 用 Scene Color 從 opaque texture 讀；opaque texture 和 BlitSource 都是不透明物體與天空畫完、透明物件還沒畫時的畫面 ([第一步](#第一步：在畫好的畫面上再畫一層)的一幀順序圖)，所以沿用同一個符號。
+
+2. 拿掉 $\mathcal{L}$
+
+   水面的深水色接在 Base Color，會被 URP Lit 打光；全螢幕 pass 沒有光照，深水色直接加上去。(簡化：實際上水下散射出來的光也會隨陽光強弱、離水面多深而變；這裡用固定的 DeepColor。)
+
+又因為距離 $d$ 不會是負的，$\tau = e^{-kd}$ 落在 0\~1，所以 $1 - \tau$ 也在 0\~1，saturate 不改值，$\alpha = 1 - \tau$。代進去，霧的混色是：
+
+$$C_{\text{out}} = \tau\,C_{\text{tint}}\,C_{\text{scene}} + (1 - \tau)\,C_{\text{deep}}, \qquad C_{\text{tint}} = \operatorname{lerp}(\mathbf{1},\ C_{\text{shallow}},\ 1 - \tau)$$
+
+兩端代入：
+
+- $d = 0$：$\tau = 1$，$C_{\text{tint}} = \mathbf{1}$，結果是原本的畫面。
+- $d$ 很大：$\tau \to 0$，結果是 $C_{\text{deep}}$。天空在 depth texture 裡是最遠的，$d$ 有好幾百公尺，所以水下往上看到的天空會整片變成深水色。
+
+### 每個像素離攝影機多遠
+
+公式還缺每個像素的 $d$。[Vector Math](vector-math.html#還原湖底那一點的位置) 講過，由像素的 screen position $(u, v)$ 和 depth texture 的值 $z_n$，可以還原出那一點的 world position $P_{\text{world}}$：
+
+$$M_{VP}^{-1}\begin{pmatrix} 2u-1\\2v-1\\z_n\\1\end{pmatrix} = \begin{pmatrix} P_{\text{world}}/w_c\\ 1/w_c\end{pmatrix}$$
+
+$M_{VP}^{-1}$ 是 world → clip 矩陣的反矩陣；右邊前三個分量除以第四個，就是 $P_{\text{world}}$。Fullscreen Shader Graph 已經替每個像素做好這件事：**Position** node (Space 選 **World**) 在這裡回傳的就是由 depth texture 還原的 $P_{\text{world}}$，不是 mesh 的 vertex 位置 (全螢幕 pass 沒有 mesh)。
+
+攝影機的位置 $P_{\text{cam}}$ 是 **Camera** node 的 **Position** 輸出 (world space)；[Flow Normals](flow-normals.html#遠處的波紋) 量攝影機到水面的距離時用過它和 **Distance** node。這裡同樣用 Distance 量兩點的距離：
+
+$$d = \lvert P_{\text{world}} - P_{\text{cam}} \rvert$$
+
+攝影機的位置不寫成 $C$，因為這份文檔的 $C$ 都是顏色 (例：$C_{\text{scene}}$)。
+
+因為 Position 要從 depth texture 還原，所以這個 pass 要宣告它需要 depth texture。URP Asset 雖然已經勾了 Depth Texture，pass 自己宣告，就不必依賴那個勾選框。
+
+### 為什麼不用 Scene Depth 的 Eye
+
+Depth Coloring 用 Scene Depth 的 **Eye** 模式量距離。[[eye depth]] 是沿攝影機正前方量的，不是沿視線；記作 $z_{\text{eye}}$，同一條視線上它和視線距離 $d$ 差一個角度：
+
+$$d = \frac{z_{\text{eye}}}{\cos\theta_{\text{off}}}$$
+
+$\theta_{\text{off}}$ 是這條視線偏離攝影機正前方的角度。下面互動圖上的 $z$、$\theta$ 就是 $z_{\text{eye}}$、$\theta_{\text{off}}$。
+
+畫面中央 $\theta_{\text{off}} = 0$，兩者相同。Game 視窗的攝影機預設垂直視角 60 度，16:9 的畫面左右邊緣 $\tan\theta_{\text{off}} = \tan 30° \times 16/9$，$\theta_{\text{off}} \approx 46°$，$d = z_{\text{eye}} / \cos 46° \approx 1.43\,z_{\text{eye}}$。
+
+例：清澈度 5 公尺，一條魚離攝影機 $d = 4$ 公尺。在畫面中央，兩種算法都是 $\tau = e^{-0.921 \times 4} \approx 2.5\%$；轉動攝影機讓牠移到畫面左右邊緣，$z_{\text{eye}} = 4 \cos 46° \approx 2.8$ 公尺，用它算出 $\tau = e^{-0.921 \times 2.8} \approx 7.6\%$，留下的魚身顏色變成三倍 (仍是暗影，但看得出變亮)。魚沒動，只是攝影機轉了頭，霧就跟著變。
+
+<iframe src="../_diagram/interactive/eye-depth-vs-distance/index.html" title="同一條魚移到畫面邊緣時，用 eye depth 和用視線距離算的霧差多少？" style="height:540px"></iframe>
+
+從水面上看時，eye depth 只用在水的厚度那一小段，差別不大；水下的霧蓋滿整個畫面、每個方向都看得到，轉頭時霧在畫面邊緣變淡會很明顯。所以水下用 Position 與 Camera 算真正的距離。
+
+### 接上霧的公式
+
+1. 建立三個 Property
+
+   在 `SG_UnderwaterFog` 的 Blackboard 按 **+** 建立，名稱與 Reference 和 `SG_Water` 的相同，[第三步](#第三步：只在水下，用所在那片湖的參數)的 C# 用這些名字寫入：
+
+   | Name | Reference | 公式裡 | 型別 | Default Value | 其他 |
+   | --- | --- | --- | --- | --- | --- |
+   | `ShallowColor` | `_ShallowColor` | $C_{\text{shallow}}$ | Color | Hexadecimal `4DC4B5` | |
+   | `DeepColor` | `_DeepColor` | $C_{\text{deep}}$ | Color | Hexadecimal `0B3440` | |
+   | `Clarity` | `_Clarity` | $D$ | Float | 5 | Mode **Slider**，Min 0.1、Max 30 |
+
+2. 刪掉暫時的 Multiply
+
+3. 算出 $\tau$ 與 $1 - \tau$
+
+   先接出距離 $d$：
+
+   | Node | 設定 | 接線 | 得到 |
+   | --- | --- | --- | --- |
+   | Position | Space：**World** | | $P_{\text{world}}$ |
+   | Camera | | 用 Position 輸出 | $P_{\text{cam}}$ |
+   | Distance | | A ← Position；B ← Camera 的 Position | $d$ |
+
+   $\tau = e^{-kd}$ 已經有現成的 node：[Depth Coloring](depth-coloring.html) 章末把水面的吸收收成了 Sub Graph `SSG_Absorption`。給它水的厚度 $h$ (輸入 Thickness) 與清澈度 $D$ (輸入 Clarity)，它從 Transmittance 輸出 $\tau = e^{-kh}$，從 Opacity 輸出 $\alpha = \operatorname{saturate}(1 - \tau)$。因為 $d$ 在這裡扮演了厚度 $h$ 的角色，所以把 Distance 接到 Thickness，算出來的就是霧的 $\tau = e^{-kd}$；Opacity 就是 $1 - \tau$ (上面說過 saturate 不改值)。
+
+   | Node | 設定 | 接線 | 得到 |
+   | --- | --- | --- | --- |
+   | SSG_Absorption | 從 Project 視窗的 `Assets/Water/Shaders/SubGraphs/` 拖進 graph 的視窗 | Thickness ← Distance；Clarity ← Clarity | Transmittance：$\tau$；Opacity：$1 - \tau$ |
+
+<ex-fig of="underwater-distance-transmittance-graph" caption="第二步的 graph (前半)。粉紅色是 Property，藍色是 Sub Graph" />
+
+4. 混色，接到 Base Color
+
+   | Node | 設定 | 接線 | 得到 |
+   | --- | --- | --- | --- |
+   | URP Sample Buffer | [第一步](#第一步：在畫好的畫面上再畫一層)的那個 | | $C_{\text{scene}}$ |
+   | Multiply「背景 τ」 | | A ← URP Sample Buffer；B ← SSG_Absorption 的 Transmittance | $\tau\,C_{\text{scene}}$ |
+   | Lerp「染色」 | A 填白色 (1, 1, 1, 1) | B ← ShallowColor；T ← SSG_Absorption 的 Opacity | $C_{\text{tint}}$ |
+   | Multiply「背景染色」 | | A ← 背景 τ；B ← 染色 | $\tau\,C_{\text{tint}}\,C_{\text{scene}}$ |
+   | Multiply「霧色」 | | A ← DeepColor；B ← SSG_Absorption 的 Opacity | $(1 - \tau)\,C_{\text{deep}}$ |
+   | Add | | A ← 背景染色；B ← 霧色 | $C_{\text{out}}$ |
+   | Fragment 的 Base Color | | ← Add | |
+
+   Lerp 輸入的名字 T 和透光率 $\tau$ 是兩回事：接進 T 的是 Opacity，$1 - \tau$。按 **Save Asset**。
+
+<ex-fig of="underwater-fog-color-mix-graph" caption="第二步的 graph (後半)。左邊的 SSG_Absorption 就是前半的那一個 node" />
+
+寫成 HLSL 是：
+
+```hlsl 對照：SG_UnderwaterFog 的霧
+float d = distance(positionWS, _WorldSpaceCameraPos);   // Position (World) 與 Camera 的 Position
+// 下面三行是 SSG_Absorption 裡面的計算 (Thickness = d)
+float k = 4.605 / Clarity;
+float tau = exp(-k * d);             // Transmittance
+float opacity = saturate(1 - tau);   // Opacity
+float3 tint = lerp(float3(1, 1, 1), ShallowColor.rgb, opacity);
+float3 color = tau * tint * sceneColor + opacity * DeepColor.rgb;   // 接 Base Color
+```
+
+### UnderwaterFogPass.cs：宣告要讀 depth texture
+
+`Setup` 加一行：
+
+```csharp Assets/Water/Scripts/UnderwaterFogPass.cs Setup()
+public void Setup(Material fogMaterial)
+{
+    material = fogMaterial;
+    // 要讀目前的畫面，畫面必須是一張中介貼圖 (不能直接讀 back buffer)
+    requiresIntermediateTexture = true;
+    // Fullscreen graph 的 Position 由深度貼圖還原
+    ConfigureInput(ScriptableRenderPassInput.Depth);
+}
+```
+
+`ConfigureInput` 宣告這個 pass 需要 URP 準備哪些圖；`ScriptableRenderPassInput.Depth` 是 depth texture。URP 會在這個 pass 之前把 depth texture 複製好。
+
+### 現在應該看到
+
+攝影機潛到水下：
+
+- 1 公尺內的魚與石頭還看得出原本的顏色，但已明顯變暗、偏灰；2~3 公尺只剩暗影；大約 5 公尺外 (清澈度) 完全融進深水色。預設清澈度 5 公尺的水下就是這麼混濁。
+- 往遠處和上方看，是一片深水色。
+- 攝影機原地轉頭，讓同一條魚從畫面中央移到邊緣：牠的濃淡不變。
+- 在 `M_UnderwaterFog` 的 Inspector 把 Clarity 拉到 15：2 公尺內的魚大致看得清，5 公尺外的魚還看得到影子。改回 5。
+
+浮出水面看岸邊：整個湖、對岸、天空都被深水色蓋住，只有腳邊幾公尺看得到，因為霧不管攝影機在不在水裡。另外，在 `SO_LakeWater` 改 Clarity，水面跟著變，霧不變：霧讀的是 `M_UnderwaterFog` 上的值。
+
+<ex-fig of="underwater-distance-fog-check" caption="示意。中間是攝影機在岸上看湖" />
+
+| 看到的現象 | 原因通常是 | 怎麼修 |
+| --- | --- | --- |
+| 近處反而濃、遠處清楚 | 某處 Transmittance 和 Opacity 接反 (背景 τ 的 B、染色的 T、霧色的 B) | 照表接 |
+| Clarity 調大，霧反而更濃 | SSG_Absorption 的 Thickness 與 Clarity 接反 (變成 $\tau = e^{-4.605\,D/d}$) | Thickness ← Distance、Clarity ← Clarity |
+| 霧不跟著攝影機走，湖的某一點附近總是最清楚 | Distance 的 B 沒接 Camera 的 Position | 接上 |
+| 畫面全黑或全白 | URP Sample Buffer 沒接到「背景 τ」，或 Add 少接一邊 | 照表接 |
+| 遠處的天空沒有霧，物體邊緣有一圈怪色 | Position 的 Space 不是 World | 改成 World |
+
+到這裡，水下的霧跟著距離變了：每個像素用自己的 $d$ 算 $\tau = e^{-kd}$，越遠越融進深水色，轉頭也不變。剩下的兩處不對，都因為 feature 每一幀無條件加入 pass：
+
+- 浮出水面，湖、對岸和天空也被深水色蓋住：pass 不管攝影機在不在水裡都加，$d$ 照樣從攝影機量起。
+- 霧讀的 $C_{\text{shallow}}$、$C_{\text{deep}}$、$D$ 是手填在 `M_UnderwaterFog` 上的值，和水面讀的設定資產是兩份，所以改 `SO_LakeWater` 霧不跟著變。
+
+`AddRenderPasses` 每台攝影機每一幀各呼叫一次，正是可以問「這台攝影機現在在哪」的地方；Wave Height Query 已經做好「這個位置在哪片湖、那裡的水面多高」的查詢，找到的湖也帶著它的設定資產。所以下一步在 `AddRenderPasses` 裡先查攝影機所在的湖，在水下才把那片湖的參數寫進材質、加入 pass。
+
+## 第三步：只在水下，用所在那片湖的參數
+
+### 查湖、比高度、寫參數
+
+**這一步只改 feature 的 `AddRenderPasses`：每台攝影機每一幀，先用 Wave Height Query 的查詢找出攝影機所在的湖、那裡此刻的水面高度，攝影機比水面低才加霧；加之前，把那片湖設定資產的淺水色、深水色、清澈度寫進霧的材質。因為判斷放在每台攝影機各問一次的地方，所以 Scene 視窗和 Game 視窗各自決定有沒有霧；因為參數每一幀從設定資產寫入，所以霧和水面讀的是同一份值。**
+
+下面依序展開：「在水下」的條件怎麼寫；參數怎麼從設定資產寫進材質；最後的 `UnderwaterFogFeature.cs`。
+
+### 攝影機在水面下嗎
+
+水面會起伏，所以「在水下」不是比 $y < 0$，而是比攝影機正上方 (或正下方) 那一點此刻的水面高度。[Wave Height Query](wave-height-query.html#TryFind) 做好了兩個查詢：
+
+1. `WaterBody.TryFind(攝影機位置, out body)`：攝影機在哪一片湖的範圍內
+2. `body.GetSurfaceHeight(攝影機位置)`：那裡的水面高度
+
+第二個查詢對水平位置 $q$ 回傳的水面高度，記作 $y_{\text{surf}}(q)$：
+
+$$y_{\text{surf}}(q) = y_0 + \zeta(p), \qquad p + u(p) = q$$
+
+$y_0$ 是水面 GameObject 的 Y，$p$ 是反推出來、被浪推到 $q$ 的那個 vertex 原本的位置，$u(p)$、$\zeta(p)$ 是它被推動的水平位移與高度。
+
+攝影機的位置寫成 $P_{\text{cam}} = (x_{\text{cam}},\ y_{\text{cam}},\ z_{\text{cam}})$ (程式裡的 `eye`)，水平位置 $q_{\text{cam}} = (x_{\text{cam}},\ z_{\text{cam}})$。這一幀加不加霧：
+
+$$\text{fog} = \begin{cases} \text{on}, & \text{lake found} \ \wedge\ y_{\text{cam}} < y_{\text{surf}}(q_{\text{cam}}) \\ \text{off}, & \text{otherwise} \end{cases}$$
+
+式子裡的 $\text{lake found}$ 指 `TryFind` 找到湖、而且那片湖有設定資產：找不到時沒有水面可比，也沒有參數可寫。剛好等於水面時不加霧。
+
+判斷放在 feature 的 `AddRenderPasses`：它每台攝影機各呼叫一次，所以 Scene 視窗的攝影機潛到水下、Game 視窗的攝影機留在岸上時，只有 Scene 視窗有霧。不在水下就不加 pass，這一幀完全不付全螢幕 pass 的成本。
+
+簡化：這裡只看攝影機所在的那一點。攝影機剛好貼著水面時，畫面有一部分在水上、一部分在水下，這一章仍然整個畫面二選一。
+
+### 參數從設定資產來
+
+找到湖之後，它的設定資產就是 `body.Settings`。霧要的三個值和水面讀的是同一組欄位，寫法也和 `WaterBody` 寫水面材質的一樣：
+
+| 設定資產 | 寫進的 Reference | 公式裡 | 寫法 |
+| --- | --- | --- | --- |
+| `shallowColor` | `_ShallowColor` | $C_{\text{shallow}}$ | `SetColor` |
+| `deepColor` | `_DeepColor` | $C_{\text{deep}}$ | `SetColor` |
+| `Clarity` | `_Clarity` | $D$ | `SetFloat`；修正過的值，至少 0.1，因為 graph 裡要算 $4.605 / D$ |
+
+`M_UnderwaterFog` 只有一份，所有攝影機共用。每台攝影機在加入 pass 之前都重寫一次，所以用的是這台攝影機所在那片湖的值。直接改 `M_UnderwaterFog` 上的值，下一幀就會被蓋回。
+
+### UnderwaterFogFeature.cs：最後的版本
+
+```csharp Assets/Water/Scripts/UnderwaterFogFeature.cs UnderwaterFogFeature
+using UnityEngine;
+using UnityEngine.Rendering.Universal;
+
+namespace Water
+{
+    // 加在 Universal Renderer 上。每台攝影機每一幀判斷：攝影機在某片湖的水面下時，
+    // 把那片湖設定資產的顏色與清澈度寫進霧的材質，再加入 UnderwaterFogPass。
+    // 整個關掉：Renderer 的 Inspector 裡，這個 feature 標題列的勾選框。
+    public class UnderwaterFogFeature : ScriptableRendererFeature
+    {
+        static readonly int ShallowColorId = Shader.PropertyToID("_ShallowColor");
+        static readonly int DeepColorId = Shader.PropertyToID("_DeepColor");
+        static readonly int ClarityId = Shader.PropertyToID("_Clarity");
+
+        [SerializeField] Material fogMaterial;   // M_UnderwaterFog
+
+        UnderwaterFogPass pass;
+
+        // 載入、啟用、在 Inspector 改值時呼叫
+        public override void Create()
+        {
+            pass = new UnderwaterFogPass();
+        }
+
+        // 每台攝影機每一幀呼叫一次；不在水下就不加 pass，不付全螢幕的成本
+        public override void AddRenderPasses(ScriptableRenderer renderer, ref RenderingData renderingData)
+        {
+            if (fogMaterial == null)
+            {
+                return;
+            }
+            // 材質預覽與 Reflection Probe 烘焙用的攝影機不加霧；Scene 視窗的攝影機要加
+            CameraType cameraType = renderingData.cameraData.cameraType;
+            if (cameraType == CameraType.Preview || cameraType == CameraType.Reflection)
+            {
+                return;
+            }
+
+            Vector3 eye = renderingData.cameraData.camera.transform.position;
+            if (!WaterBody.TryFind(eye, out WaterBody body) || body.Settings == null)
+            {
+                return;
+            }
+            if (eye.y >= body.GetSurfaceHeight(eye))
+            {
+                return;
+            }
+
+            // 參數的唯一來源是攝影機所在那片湖的設定資產；直接改材質上的值會被蓋回
+            // 顏色用 SetColor：和 WaterBody 寫水面材質的方式相同
+            WaterSettings settings = body.Settings;
+            fogMaterial.SetColor(ShallowColorId, settings.shallowColor);
+            fogMaterial.SetColor(DeepColorId, settings.deepColor);
+            fogMaterial.SetFloat(ClarityId, settings.Clarity);
+
+            pass.Setup(fogMaterial);
+            renderer.EnqueuePass(pass);
+        }
+    }
+}
+```
+
+和[第一步](#第一步：在畫好的畫面上再畫一層)比，多了三段：
+
+- 三個 `PropertyToID`：Reference 名稱先換成數字代號，每一幀寫入時不必再查字串，和 `WaterBody` 的寫法相同。
+- 找湖與比高度：`renderingData.cameraData.camera` 是這台攝影機的 `Camera` 元件，取它的位置 `eye`。不在任何一片湖的範圍內、湖沒有設定資產、或攝影機在水面上 (含剛好等於水面)，都直接 return。
+- 寫入材質，最後才 `Setup` 與 `EnqueuePass`。
+
+`WaterBody` 有 `[ExecuteAlways]`，它的清單在不按 Play 時就有內容，所以 Scene 視窗在編輯時也會依攝影機位置加霧。
+
+### 現在應該看到
+
+- 攝影機在水面上：沒有霧，湖和這一章之前一樣。
+- 用 Scene 視窗的攝影機慢慢往下穿過水面：攝影機一到水面下，霧立刻出現；往上穿出，霧立刻消失。停在水面附近時，浪經過會讓霧一下有一下沒有，這一章是這樣的。
+- 在 `SO_LakeWater` 把 Clarity 從 5 改成 15：岸上看，湖心隱約看得到底；潛下去，2 公尺內的魚大致看得清，7 公尺左右還看得到影子。改回 5。改 Deep Color，水面的深處和水下的霧一起變色。
+- `M_UnderwaterFog` 上的三個值跟著設定資產；直接改它，馬上被蓋回。
+- Scene 視窗在水下、Game 視窗的角色攝影機在岸上：只有 Scene 視窗有霧。
+
+<ex-fig of="underwater-fog-below-surface-check" caption="示意。水面上的兩張是攝影機在岸上看湖" />
+
+| 看到的現象 | 原因通常是 | 怎麼修 |
+| --- | --- | --- |
+| 水面上也有霧，和[第二步](#第二步：越遠，霧越濃)一樣 | `AddRenderPasses` 還是[第一步](#第一步：在畫好的畫面上再畫一層)的版本，或比較寫反 (`eye.y < …` 時 return) | 照上面的程式 |
+| 水面下沒有霧 | 攝影機不在水面 mesh 的範圍內 (例如湖岸外的水下)、`WaterSurface` 的 `WaterBody` 沒指定設定資產，或 `WaterBody` 被停用 | 在湖的範圍內測；檢查 `WaterSurface` |
+| 改 `SO_LakeWater` 的某一項，霧沒反應 | graph 裡那個 Property 的 Reference 和 C# 的名字不同 | 對照 `_ShallowColor`、`_DeepColor`、`_Clarity` |
+| Console 紅字 `'WaterBody' does not contain a definition for 'TryFind'` | `WaterBody.cs` 不是 Wave Height Query 結束時的版本 | 對照教材 GitHub repo 裡的 [`WaterBody.cs`](https://github.com/RogelioKG/explain-waterbody/blob/main/urp-water/unity/Assets/Water/Scripts/WaterBody.cs) |
+
+## 回頭看
+
+### 接回開頭的問題
+
+開頭的問題是：潛到水下，畫面還是岸上的樣子，水下看得到的距離和水面上的清澈度對不上。一路下來：
+
+| 步驟 | 解決的 | 留下的東西 |
+| --- | --- | --- |
+| [第一步](#第一步：在畫好的畫面上再畫一層) | 物體各自畫完後，再對整個畫面加一層 | `SG_UnderwaterFog` (Fullscreen)、`M_UnderwaterFog`；`UnderwaterFogPass` 在透明物件之前 blit 並換掉 `cameraColor`；`UnderwaterFogFeature` 掛在 Renderer 上 |
+| [第二步](#第二步：越遠，霧越濃) | 遠近一樣 | 和水面同一套 Beer-Lambert：Distance 接進 `SSG_Absorption` 的 Thickness，$\tau = e^{-kd}$，$d = \lvert P_{\text{world}} - P_{\text{cam}} \rvert$ 由 Position (World) 與 Camera 的 Position 量出；$C_{\text{out}} = \tau\,C_{\text{tint}}\,C_{\text{scene}} + (1 - \tau)\,C_{\text{deep}}$ |
+| [第三步](#第三步：只在水下，用所在那片湖的參數) | 水面上也有霧、參數對不上 | `AddRenderPasses` 用 `TryFind` 與 `GetSurfaceHeight` 判斷，攝影機在水下 ($y_{\text{cam}} < y_{\text{surf}}(q_{\text{cam}})$) 才把那片湖的參數寫進材質並加入 pass |
+
+清澈度 $D$ 是透光率剩 1% 的距離。水面上，它是從上方看多深之後看不到底；水下，它是魚完全消失的距離。兩邊讀同一份設定資產，調一個值就一起變。
+
+### 檢查點：潛進水裡換成水下色調與距離霧
+
+做對時你會看到：
+
+- 攝影機在水面上：沒有霧。穿過水面的那一刻霧出現，穿出時消失。
+- 水下：越遠越暗、越偏水色。預設清澈度 5 公尺時，約 0.75 公尺內大致看得清，2.5 公尺只剩暗影，約 5 公尺完全融進深水色；轉頭時同一條魚的濃淡不變。
+- 在 `SO_LakeWater` 改 Clarity 或 Deep Color，水面上的深淺與水下的霧一起變。
+- 從水下往上看：看不到水面，上方是一片深水色。這是預期的：水面只畫正面，從下面看到的是背面；天空在 depth texture 裡是最遠的，被霧蓋住。
+- 調效果用 Scene 視窗；最後讓角色走到湖心較深的地方，角色的攝影機沒入水面時，在 Game 視窗確認一次。
+
+<ex-fig of="underwater-fog-clarity-check" caption="示意：攝影機在水下。左、中平視湖心；右是往上看" />
+
+| 看到的現象 | 原因通常是 | 回到哪一步 |
+| --- | --- | --- |
+| 畫面完全沒變 | feature 沒加到目前用的 Renderer、Fog Material 是空的、或被取消勾選 | [第一步](#第一步：在畫好的畫面上再畫一層) |
+| 看不到場景、一片奇怪的顏色 | Source Buffer 不是 BlitSource | [第一步](#第一步：在畫好的畫面上再畫一層) |
+| 整個畫面一樣染色，遠近沒差 | graph 還是[第一步](#第一步：在畫好的畫面上再畫一層)的暫時版本 | [第二步](#第二步：越遠，霧越濃) |
+| 近處濃、遠處清 | Transmittance 與 Opacity 接反 | [第二步](#第二步：越遠，霧越濃) |
+| 水面上也有霧 | `AddRenderPasses` 沒有判斷水下 | [第三步](#第三步：只在水下，用所在那片湖的參數) |
+| 霧和水面的清澈度不同步 | Reference 名稱不一致，或 feature 沒寫入材質 | [第三步](#第三步：只在水下，用所在那片湖的參數) |
+| 水下的霧比預期濃，遠處像蓋了兩層 | Lighting 視窗的 Fog 有開，物體自己又混了一次霧 (見「變化與延伸」) | — |
+
+**對應 Final Demo**：「潛進水裡後，畫面換成水下色調，加上距離霧」與「遠處的魚和物體逐漸看不清，近處清楚」。
+
+此時你的專案裡，以下檔案應該和教材 GitHub repo 的[範例程式碼](https://github.com/RogelioKG/explain-waterbody/tree/main/urp-water/unity)相同：
+
+- `Assets/Water/Water.asmdef` (加了兩個引用；Inspector 存的可能是 `GUID:` 寫法)
+- `Assets/Water/Scripts/UnderwaterFogFeature.cs` (這一章新增)
+- `Assets/Water/Scripts/UnderwaterFogPass.cs` (這一章新增)
+- `Assets/Water/Scripts/WaterBody.cs`、`WaterSettings.cs`、`WaterMesh.cs`、`WaterHeightProbe.cs` (這一章沒有改它們)
+- `Assets/Water/Shaders/GerstnerWaves.hlsl` (這一章沒有改它)
+
+`SG_UnderwaterFog`、`M_UnderwaterFog` 與 Renderer 上的設定在你的專案裡，不在 repo 裡。
+
+### 下一步
+
+- 下一章 ⬜ Surface from Below 讓水面從下面也畫得出來：往上看時，水面跟著波浪晃動。
+
+### 請回報
+
+以下是官方文件沒有寫清楚、需要你在 Unity 裡看一眼的事：
+
+| # | 去哪裡看 | 回報什麼 |
+| --- | --- | --- |
+| 1 | 每一步改完程式後的 Console | 有沒有紅字，有的話第一行是什麼 |
+| 2 | [第一步](#第一步：在畫好的畫面上再畫一層)：`Water.asmdef` 的 Assembly Definition References 按 + 後的清單 | 有沒有 `Unity.RenderPipelines.Universal.Runtime`、`Unity.RenderPipelines.Core.Runtime` 這兩個名字 |
+| 3 | [第一步](#第一步：在畫好的畫面上再畫一層)：URP Sample Buffer 的 Source Buffer 下拉選單 | 選項的實際寫法 (BlitSource 或 Blit Source) |
+| 4 | [第一步](#第一步：在畫好的畫面上再畫一層)：Renderer 的 Inspector | 改之前 Depth Texture Mode 和 Rendering Path 各是什麼；Add Renderer Feature 選單裡我們的 feature 叫什麼名字 |
+| 5 | [第一步](#第一步：在畫好的畫面上再畫一層)：加上 feature 後 | Scene 與 Game 視窗是否都染色；材質預覽球是否不受影響 |
+| 6 | [第二步](#第二步：越遠，霧越濃)：`SSG_Absorption` 拖進 `SG_UnderwaterFog` 之後 | node 上有沒有錯誤或警告圖示；Save Asset 後 Console 有沒有紅字 |
+| 7 | [第二步](#第二步：越遠，霧越濃)：攝影機在水下 | 往上看是否一片深水色；原地轉頭時同一條魚的濃淡是否不變 |
+| 8 | [第三步](#第三步：只在水下，用所在那片湖的參數)：Scene 視窗潛到水下、Game 視窗留在岸上 | 是否只有 Scene 視窗有霧 |
+| 9 | [第三步](#第三步：只在水下，用所在那片湖的參數)：照 Wave Height Query 複製第二片 Y = 2 的湖，把它的設定資產換成另一份、Deep Color 改成明顯不同的顏色；Scene 視窗潛進一片、Game 視窗的攝影機潛進另一片 | 兩個視窗的霧色是否各自對 |
+| 10 | Window > Rendering > Lighting 的 Environment 分頁 | Fog 是否勾選 |
+| 11 | Window > Analysis > Render Graph Viewer (找不到時寫實際位置)，攝影機在水下 | 清單裡有沒有 `Underwater Fog`，它前後各是哪個 pass |
+
+## 變化與延伸
+
+### 效能
+
+這一章的代價只在攝影機位於水下時才付：
+
+- 一次全螢幕 pass：每個像素一次取樣、一次 `exp`。
+- `requiresIntermediateTexture`：這一幀先畫在中介貼圖上，最後多一次複製到螢幕。
+- depth texture：URP Asset 已經勾了 Depth Texture，這一項本來就在付。
+
+攝影機在水面上時，`AddRenderPasses` 在 `EnqueuePass` 之前就 return，什麼都不加。要完全關掉：Renderer 的 Inspector 裡取消 Underwater Fog Feature 標題列的勾選框，用這個 Renderer 的所有攝影機一起關。執行中要關，可以呼叫 feature 的 `SetActive(false)`，範圍一樣是所有攝影機。這些成本沒有量測過，以 Profiler 為準。
+
+不做降解析度。霧是每個像素依它自己的距離算的，降到一半解析度再放大，近處物體 (距離小、霧淡) 和它後面的遠景 (距離大、全是霧色) 交界的地方會糊成一圈光暈；而每個像素只多一次取樣和一次 `exp`，省下的不多。
+
+### 內建的 Full Screen Pass Renderer Feature
+
+URP 有內建的 Full Screen Pass Renderer Feature，Injection Point 選 Before Rendering Transparents、Pass Material 指定 `M_UnderwaterFog`，也能畫出[第二步](#第二步：越遠，霧越濃)的霧。這一章自己寫，是因為內建的只能整個 Renderer 一起開關：它不能依每台攝影機在不在水下決定要不要畫，也不會把攝影機所在那片湖的參數寫進材質。
+
+### Lighting 視窗的 Fog
+
+Window > Rendering > Lighting 的 Environment 分頁有一個內建的 Fog。它不是全螢幕 pass，而是每個物體的 shader 在畫自己的時候混進霧色，距離用的是 eye depth。它和這一章的霧互不知道對方：兩個都開時，水下的物體會先混一次內建霧，再被水下霧處理一次。它也是整個場景共用一個開關，不分攝影機。所以這個專案的水下用這一章的霧；岸上需要大氣霧時，要留意它在水下會疊上去。
+
+## 來源
+
+### 官方文件與原始碼
+
+縮寫：`M` = `https://docs.unity.com/en-us/engine/6000.3/manual` (Unity 6000.3)；`SG` = `https://docs.unity3d.com/Packages/com.unity.shadergraph@17.3/manual`；原始碼 = GitHub `Unity-Technologies/Graphics` 分支 `6000.3/staging`。
+
+- 自訂 pass 的寫法 (`RecordRenderGraph` 只宣告、不下指令)：`M/render-pipelines/universal-render-pipeline/customizing-urp/render-graph/write-render-pass`；用 Renderer Feature 插入 pass (`Create`、`AddRenderPasses` 的呼叫時機，不要在 `AddRenderPasses` 建立資源)：`M/…/customizing-urp/inject-a-render-pass/inject-a-pass-using-a-scriptable-renderer-feature`
+- 插入點 `RenderPassEvent`：`M/…/customizing-urp/inject-a-render-pass/custom-pass-injection-points`；原始碼 `ScriptableRenderPass.cs`
+- blit 與「不要 blit 回去」：`M/…/customizing-urp/render-graph/blit`；建立暫存貼圖、避免 `CreateRenderGraphTexture`：`M/…/render-graph/working-with-textures/create-a-texture`；官方範例 `URP RenderGraph Samples` 的 `BlitAndSwapColorRendererFeature.cs`
+- `AddBlitPass`、`BlitMaterialParameters` (來源綁到 `_BlitTexture`、不改動材質)：原始碼 `Packages/com.unity.render-pipelines.core/Runtime/RenderGraph/RenderGraphUtilsBlit.cs`
+- `UniversalResourceData` 的欄位、`requiresIntermediateTexture`：`M/…/render-graph/frame-data/reference`；原始碼 `URP/Runtime/FrameData/UniversalResourceData.cs`
+- Unity 6.3 移除 Compatibility Mode：`M/upgrade-guides/upgrade-guide-unity63`
+- 一幀內 Copy Depth、Copy Color、透明物件的順序，以及 Depth Texture Mode 的複製時機：原始碼 `URP/Runtime/UniversalRendererRenderGraph.cs` (`OnMainRendering`、`CalculateDepthCopySchedule`)；Depth Texture Mode 選項：`M/…/urp-reference/urp-universal-renderer`
+- Fullscreen graph 可以放 Sub Graph node (Fullscreen 對 `SubGraphNode` 直接放行)：原始碼 `Packages/com.unity.shadergraph/Editor/Generation/Targets/Fullscreen/FullscreenSubTarget.cs` (`IsNodeAllowedBySubTarget`)
+- Fullscreen Shader Graph 的 Graph Settings：`M/materials-and-shaders/built-in/shaders-in-universalrp/prebuilt-shader-graphs-urp/fullscreen`；Fullscreen graph 的 Position 由深度還原、沿視線的距離：原始碼 `Packages/com.unity.shadergraph/Editor/Generation/Targets/Fullscreen/Includes/FullscreenCommon.hlsl`
+- URP Sample Buffer：`SG/URP-Sample-Buffer-Node.html`；Camera node：`SG/Camera-Node.html`；Scene Depth (Eye 是沿攝影機前方)：`SG/Scene-Depth-Node.html` 與原始碼 `SceneDepthNode.cs`
+- 內建 Full Screen Pass Renderer Feature：`M/post-processing-and-full-screen-effects/urp/custom-post-processing/renderer-feature-full-screen-pass`；原始碼 `FullScreenPassRendererFeature.cs`
+- `ScriptableRendererFeature.SetActive`：原始碼 `URP/Runtime/ScriptableRendererFeature.cs`
+- 內建 Fog 由各物體的 shader 混入 (`MixFog`)：原始碼 `URP/ShaderLibrary/ShaderVariablesFunctions.hlsl`；`RenderSettings.fog`：`https://docs.unity.com/en-us/engine/6000.3/script-reference/unityengine/rendersettings/fog`
+
+### 數字
+
+- 透光率的表：$\tau = e^{-4.605\,d/D}$ 直接計算；「大致看得清」取 $\tau \ge 50\%$，距離 $D \ln 2 / 4.605$；表中「看起來」以橘色的魚 (sRGB `F08C3C`) 代入混色式、在 DeepColor `0B3440` 上算出的顏色描述
+- 畫面邊緣的角度：垂直視角 60 度、16:9，左右邊緣 $\tan\theta = \tan 30° \times 16/9$，$\theta \approx 45.7°$，$1/\cos\theta \approx 1.43$
+- 示意圖的霧：每個物體依它和攝影機的距離 (攝影機離湖底 1.2 公尺，魚約 0.7、1.5、3、6 公尺) 算 $1 - \tau$，當作疊上去的青色的不透明度
+</script>
+<script>
+explainer({
+  title: 'Underwater Fog and Visibility',
+  assumes: ['Unity 編輯器的基本操作 (看完 Unity Learn 的 Basic 與 Creative Core)', 'C# 基礎', { t: 'Depth Coloring (透光率、清澈度、ShallowColor 與 DeepColor)', href: 'depth-coloring.html' }, { t: 'Wave Height Query (WaterBody.TryFind、GetSurfaceHeight)', href: 'wave-height-query.html' }, { t: 'URP Waterbody (總覽)', href: 'urp-water.html' }],
+  approach: '重新發明：先在畫好的畫面上整片染色，再由「遠近一樣」帶出沿視線距離的 Beer-Lambert，最後由「水面上也有霧」帶出依攝影機所在的湖判斷水下',
+  env: 'Windows 11、Unity 6000.3.20f1 (英文介面)、URP 17.3',
+  terms: {
+    'full-screen pass': '全螢幕 pass：蓋滿整個畫面的一次繪製，每個像素讀進原本的顏色，寫出新的顏色',
+    'RenderPassEvent': 'URP 列出的插入點，每個值代表一幀裡的一個位置；自己的 pass 用它決定排在哪裡',
+    'Fullscreen Shader Graph': '專門畫全螢幕的 Shader Graph：沒有 mesh、沒有光照，Fragment 只接 Base Color',
+    'Render Graph': 'URP 17 安排一幀的方式：先把每個 pass 讀寫哪些圖排成清單，再決定配置與執行',
+    'render pass': '一幀裡的一次繪製工作 (例：畫不透明物體、複製深度、這一章的水下霧)',
+    'Renderer': 'URP Asset 底下的另一份設定檔，決定一幀依什麼步驟畫出來',
+    'Renderer Feature': '加在 Renderer 上的外掛 (ScriptableRendererFeature)，每台攝影機每一幀決定要不要插入自己的 pass',
+    'back buffer': '最後顯示在螢幕上的那張圖；不能拿來當輸入讀',
+    'TextureHandle': 'Render Graph 裡一張貼圖的代號；排清單時還沒有真正的貼圖，只在這一幀有效',
+    'TextureDesc': '貼圖的描述：寬、高、格式、名稱等，Render Graph 照它配置暫存貼圖',
+    'blit': '把一張圖經過材質畫到另一張圖：目的地的每個像素跑一次 shader，shader 裡讀得到來源 (_BlitTexture)',
+    'CameraType': '攝影機的種類：Game、SceneView、Preview (材質預覽)、Reflection (Reflection Probe 烘焙) 等',
+    '透光率': 'τ：光穿過 d 公尺的水之後剩下的比例，0 到 1；τ = e^(−kd)',
+    '清澈度': '看進去多遠 (公尺) 之後透光率剩 1%；水面上是見底的深度，水下是看得到魚的距離',
+    '吸收係數': 'k：決定光被水吸收得多快，單位 1 / 公尺；k = 4.605 ÷ 清澈度',
+    'eye depth': '沿攝影機正前方量的距離，單位公尺；畫面邊緣比沿視線的距離小',
+  },
+});
+</script>
+</body>
+</html>

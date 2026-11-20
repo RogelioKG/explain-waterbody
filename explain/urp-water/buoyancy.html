@@ -1,0 +1,631 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Buoyancy</title>
+<script src="../_explainer/explainer.js"></script>
+</head>
+<body>
+<script type="text/markdown" id="ex-content">
+## 這一章要解決的問題
+
+### 查得到水面高度，東西還是會沉
+
+做完 [Wave Height Query](wave-height-query.html)，C# 查得到湖上任一點此刻的水面高度。但放一顆掛著 [[Rigidbody]] (剛體：掛上它，物體就交給物理系統，每一小段時間依受到的力更新速度、位置與旋轉) 的方塊到湖面上方，按下 Play，它會直接穿過水面沉到湖底：水面只是畫出來的 mesh，沒有 Collider，物理系統不知道那裡有水。
+
+這一章對應 Final Demo「互動與物理」的第一條：
+
+> 浮標會跟著波浪上下起伏、左右傾斜
+
+做完後，方塊落水會先往下沉一段，浮上來晃一兩下，就停在半泡在水裡的高度；浪經過時跟著起伏，浪的斜坡經過時跟著傾斜。這些由一個可重用的元件 `Buoyancy` 做到：掛在任何有 Rigidbody 的物體上，調幾個數字就能浮。浮標本身 (咬鉤時下沉、釣線) 留給下一章。
+
+這一章不講：照 mesh 的實際形狀算排開多少水的精確浮力、水流推著物體走、浮標的咬鉤與釣線 ([Fishing Bobber](fishing-bobber.html))、漣漪與水花 ([Interactive Ripples](interactive-ripples.html))。
+
+### 這一章怎麼走
+
+| 步驟 | 做什麼 | 接下來要處理的 |
+| --- | --- | --- |
+| [第一步](#第一步：一個浮點，讓方塊浮起來) | 在方塊中心取一個點，依方塊泡進水裡幾成往上推 | 一直彈跳，停不下來 |
+| [第二步](#第二步：加上水的阻力) | 加上水的阻力：和速度反向，泡得越深越大 | 不會跟著水面傾斜 |
+| [第三步](#第三步：多個浮點，跟著水面傾斜) | 換成四個點，各自查水面、各自在自己的位置推 | |
+
+每一步之後都有「現在應該看到」和對照表。示意圖都是從側面看方塊。
+
+## 第一步：一個浮點，讓方塊浮起來
+
+### 泡得越深，往上推越大
+
+**方塊會沉，是因為只有重力在拉它。這一步在方塊中心取一個點，叫[[浮點]] (查水面高度、算浮力的位置)，每一步物理都查它所在位置的水面高度，算出方塊泡進水裡幾成，就往上推幾成的力。因為泡得越深推得越大，方塊會停在推力剛好等於重量的深度，那就是它浮著的高度。**
+
+下面依序展開：浮力為什麼和泡進水裡的比例成正比；方塊怎麼準備；力要在什麼時候、用什麼函式加；最後寫成 `Buoyancy` 的第一版。
+
+### 浮力是排開的水的重量
+
+因為浮力是排開的水的重量，方塊側面又是直的，所以浮力是「$\beta$ 倍重量 × 泡進水裡的比例」，$\beta = \rho_{\text{water}} / \rho_{\text{body}}$ (水的密度 ÷ 方塊的密度)，整顆泡進去後不再變大。
+
+拿 1 公尺見方、$\beta = 2$ 的方塊，在靜止的水面算三個高度：
+
+| 中心的高度 (相對水面) | 底面的高度 | 泡進水裡的比例 | 浮力 | 結果 |
+| --- | --- | --- | --- | --- |
+| +0.3 m | −0.2 m | 0.2 | 0.4 倍重量 | 往下沉 |
+| 0 | −0.5 m | 0.5 | 1 倍重量 | 不動 |
+| −0.3 m | −0.8 m | 0.8 | 1.6 倍重量 | 往上浮 |
+
+中心在水面時剛好泡一半，浮力等於重量；高了就沉回來，低了就浮上去。
+
+### 寫成式子
+
+一般的物體不一定是方塊，所以把「方塊」換成浮點代表的一根柱子：以浮點為中心、高 $H_{\text{col}}$ 的垂直柱子。只有一個浮點時，柱子就是整顆方塊，$H_{\text{col}}$ 是方塊的高度。泡進水裡的比例記作 $f_{\text{sub}}$：
+
+$$f_{\text{sub}} = \operatorname{clamp}\!\left(\frac{y_{\text{surf}} - y_{\text{bot}}}{H_{\text{col}}},\ 0,\ 1\right), \qquad y_{\text{bot}} = y_{\text{pt}} - \tfrac{1}{2}H_{\text{col}}$$
+
+- $y_{\text{pt}}$：浮點的高度。
+- $y_{\text{bot}}$：柱底的高度。
+- $y_{\text{surf}}$：浮點正上方 (或正下方) 的水面高度，就是 `GetSurfaceHeight` 查到的 $y_{\text{surf}}(q) = y_0 + \zeta(p)$。
+- $\operatorname{clamp}$：把值夾在 0\~1 之間。柱底在水面上是 0，整根泡進去是 1。
+
+<ex-fig of="buoyancy-column-submerged-fraction" caption="示意：1 公尺見方、β = 2 的方塊。箭頭長度和力的大小成正比" />
+
+浮力除以質量，是往上的加速度 $\beta\,f_{\text{sub}}\,g$；重力的加速度是往下的 $g = 9.81$ 公尺 / 秒²。兩個加起來，方塊往上的加速度 $a_y$ 是
+
+$$a_y = \beta\,f_{\text{sub}}\,g - g$$
+
+$a_y = 0$ 時方塊不再加速，這時 $f_{\text{sub}} = 1/\beta$。所以 $\beta$ 決定物體靜止時泡進水裡幾成：$\beta = 2$ 泡一半，$\beta = 4$ 泡四分之一；$\beta < 1$ 時整顆泡進去浮力也撐不住重量，會沉到底 ($\beta = 1$ 時整顆泡進去剛好撐住，懸在水中)。
+
+### 準備方塊
+
+1. 放一顆方塊
+
+   GameObject > 3D Object > **Cube**，放在湖中央水深的地方，抬到水面上方 (例如底面離水面 1 公尺)。尺寸先用預設的 1 公尺見方，這一章的數字都照這個大小算。
+
+2. 掛上 Rigidbody
+
+   Inspector 的 **Add Component** > Physics > **Rigidbody**。設定都用預設，Mass 是 1 (公斤)。
+
+3. 讓水面先靜止
+
+   不在 Play 時，在 `SO_LakeWater` 把 **Height Scale** 改成 0。沒有浪，才看得清楚方塊本身怎麼動。設定資產在 Play 中改了也不會還原，所以一律在停止時改。
+
+4. 按 Play
+
+   方塊往下掉，穿過水面，停在湖底。停止 Play。
+
+### 每一步物理加一次力
+
+物理系統每隔固定的時間走一步，預設 0.02 秒，一秒 50 步，和畫面的格數無關。每一步，Unity 先呼叫所有元件的 `FixedUpdate`，再依這段時間裡累積的力，算出每個 Rigidbody 新的速度與位置。所以力要在 `FixedUpdate` 裡加，每一步都加一次。寫在 `Update` 的話，一秒加幾次會跟著畫面的格數變，畫面越順，方塊受的力越多。
+
+加力用 `Rigidbody.AddForce`：
+
+```csharp Rigidbody.AddForce()
+public void AddForce(Vector3 force, ForceMode mode);
+```
+
+| 參數 | 型別 | 用途 |
+| --- | --- | --- |
+| `force` | `Vector3` | 力，world space |
+| `mode` | `ForceMode` | 怎麼解讀 `force`；這一章一律用 `ForceMode.Force` |
+
+`ForceMode.Force` 把 `force` 當成力 (單位牛頓)，每一步給的衝量是 `force` × 0.02 秒。所以照「力 = 質量 × 加速度」，要得到加速度 $\beta\,f_{\text{sub}}\,g$ 就傳「質量 × $\beta\,f_{\text{sub}}\,g$」，方塊多重都一樣浮。
+
+往上的方向與 $g$ 的大小，從 `Physics.gravity` 拿：它是重力加速度的向量 (Project Settings > Physics 的 Gravity，朝下)，加個負號就是朝上、長度 $g$。
+
+查水面用 [Wave Height Query](wave-height-query.html) 做好的兩個函式：`WaterBody.TryFind` 依位置找出所在的湖，`GetSurfaceHeight` 查那一點的水面高度。查詢用的時間是 `Time.time`，而在 `FixedUpdate` 裡讀 `Time.time`，拿到的是這一步物理的時間，所以查到的水面和這一步物理是同一個時刻。
+
+### Buoyancy.cs：第一版
+
+在 `Assets/Water/Scripts/` 建立 `Buoyancy.cs`：
+
+```csharp Assets/Water/Scripts/Buoyancy.cs Buoyancy (第一步的版本)
+using UnityEngine;
+
+namespace Water
+{
+    [RequireComponent(typeof(Rigidbody))]
+    public class Buoyancy : MonoBehaviour
+    {
+        [SerializeField] float columnHeight = 1f;    // 柱高，公尺；只有一個浮點時是物體的高度
+        [SerializeField] float buoyancyRatio = 2f;   // 全部泡進水裡時，浮力是重量的幾倍
+
+        Rigidbody body;
+
+        void Awake()
+        {
+            body = GetComponent<Rigidbody>();
+        }
+
+        void FixedUpdate()
+        {
+            if (!WaterBody.TryFind(transform.position, out WaterBody water))
+            {
+                return;
+            }
+            Vector3 point = transform.position;
+            float bottom = point.y - 0.5f * columnHeight;
+            float submerged = Mathf.Clamp01((water.GetSurfaceHeight(point) - bottom) / columnHeight);
+            body.AddForce(-Physics.gravity * (body.mass * buoyancyRatio * submerged), ForceMode.Force);
+        }
+    }
+}
+```
+
+- `[RequireComponent(typeof(Rigidbody))]`：掛上 `Buoyancy` 時，物體沒有 Rigidbody 就自動補一個，也不能先把 Rigidbody 拿掉。
+- `Awake` 只在開始時取一次 Rigidbody，存在 `body`，不必每一步都找。
+- 不在任何一片湖上時直接 return，方塊只受重力。
+- `point` 是浮點，這一步就是方塊的中心；`bottom` 是 $y_{\text{bot}}$，`submerged` 是 $f_{\text{sub}}$。
+- 最後一行是浮力：`-Physics.gravity` 是朝上、長度 $g$ 的向量，乘上質量 × $\beta$ × $f_{\text{sub}}$。
+
+### 放進 Scene
+
+選取方塊，**Add Component** > **Buoyancy**。Inspector 出現 **Column Height** 1、**Buoyancy Ratio** 2，都不用改。按 Play。
+
+### 現在應該看到
+
+- 方塊掉進水裡，沉到頂面在水面下約 1 公尺，再衝出水面，回到放手的高度，接著又掉下去。這樣一直重複，每一趟約 2.2 秒，不會變小。(放手時底面離水面多高，就彈回多高；頂面也沉到水面下差不多一樣深。)
+- 停止 Play，把 Height Scale 改回 1，再按 Play：方塊照樣上下彈，高度時高時低，有時比放手時跳得還高。
+- 不論哪一種，方塊一直保持水平。
+
+| 看到的現象 | 原因通常是 | 怎麼修 |
+| --- | --- | --- |
+| 方塊照樣穿過水面沉到湖底 | 方塊不在任何一片水面的範圍內，或 `WaterSurface` 的 `WaterBody` 被停用 | 把方塊移到湖的範圍內；檢查 `WaterSurface` |
+| 方塊一直沉，浮不起來 | Buoyancy Ratio 小於 1 | 改回 2 |
+| 方塊停在空中不動 | Rigidbody 勾了 **Is Kinematic** | 取消勾選 |
+| Console 紅字 `The type or namespace name 'WaterBody' could not be found` | `Buoyancy.cs` 沒放在 `Assets/Water/` 底下，或少了 `namespace Water` | 對照上面的程式與路徑 |
+
+### 為什麼停不下來
+
+到這裡，方塊浮得起來，但一直彈跳。因為浮力只看高度，方塊往下經過和往上經過同一個高度時，受到的力一模一樣，所以往下沉時浮力拿走多少速度，往上浮時經過同一段距離就還回多少，方塊回到放手的高度，像一個沒有摩擦的彈簧。
+
+用 $\beta = 2$ 實際走一遍：
+
+- 底面碰到水之前，只有重力，加速度 $-g$。
+- 從底面碰到水到整顆泡進去，$f_{\text{sub}}$ 從 0 變到 1，$a_y = 2\,f_{\text{sub}}\,g - g$ 從 $-g$ 均勻變到 $+g$。前半段減速多少、後半段就加速多少，平均下來是 0，所以整顆泡進去那一刻的速度，和底面剛碰到水時一樣。
+- 整顆泡進去之後，加速度是 $+g$，剛好是水面上那段 $-g$ 反過來：在水面上自由落下多遠，在水面下就要多遠才停住。
+
+<ex-fig of="buoyancy-drop-bounce-forever" caption="示意：底面離水面 1 公尺放手，靜止的水面，沒有阻力" />
+
+有浪時，水面時而迎著方塊上來、時而往下退，有時把它推得更高、有時削掉一些，所以彈跳的高度時高時低。不論哪一種，都缺一個只拿走、不還回的力：方塊往下時往上推、往上時往下拉，永遠和速度反向。水本身就會給這樣的力，下一步把它加上。
+
+## 第二步：加上水的阻力
+
+### 只拿走、不還回
+
+**要停下來，得有一個永遠和速度反向的力：方塊往下時往上推、往上時往下拉。所以這一步給泡在水裡的部分加上阻力，大小和速度成正比，也和泡進水裡的比例成正比；方塊每動一下都被拿走一點速度，彈幾下就停在平衡的高度。**
+
+下面依序展開：阻力的式子；程式裡怎麼拿到方塊的速度；阻力該設多大。
+
+### 阻力的式子
+
+$$\mathbf{a}_{\text{drag}} = -\,b\,f_{\text{sub}}\,\mathbf{v}_{\text{body}}$$
+
+- $\mathbf{v}_{\text{body}}$：方塊的速度 (向量)。
+- $b$：水的阻力，單位是 1 / 秒。整顆泡在水裡時，阻力造成的加速度是速度的 $b$ 倍、方向相反。
+- 負號：永遠和速度反向，所以不論往哪動都被拿走速度，不會像浮力那樣還回來。
+- 乘上 $f_{\text{sub}}$：只有泡在水裡的部分受水的阻力。剛碰到水時阻力很小，方塊不會一碰水就像被黏住。
+
+例：$b = 8$，方塊泡一半 ($f_{\text{sub}} = 0.5$)。往下 2 公尺 / 秒時，阻力的加速度是 $8 \times 0.5 \times 2 = 8$ 公尺 / 秒²，朝上，快和重力一樣大；慢到 0.2 公尺 / 秒時只剩 0.8。動得快時擋得多，所以落水的衝勢很快被吃掉；快停時擋得少。
+
+簡化：浪裡的水本身也在動，這裡把水當成靜止的，阻力只看方塊自己的速度。讓水推著物體走不在這一章。
+
+程式裡的阻力和浮力一樣乘上質量：「$-$ 質量 × $b$ × $f_{\text{sub}}$ × 速度」。
+
+### 方塊的速度：linearVelocity
+
+方塊的速度是 `Rigidbody.linearVelocity`，world space，公尺 / 秒。Unity 6 起它叫這個名字；舊版本與舊教學裡的 `velocity` 是同一個東西。
+
+Rigidbody 的 Inspector 也有一個內建的阻力 **Linear Damping** (舊名 Drag)：每一步把速度乘上 $1 - d \times 0.02$，$d$ 是填的值，和上面的阻力是同一種形式。這裡不用它，因為它不管物體在不在水裡都一樣作用；自己算，阻力才會只在水裡、依泡進水裡的比例出現。
+
+### Buoyancy.cs：第二版
+
+```csharp Assets/Water/Scripts/Buoyancy.cs Buoyancy (第二步的版本)
+[SerializeField] float columnHeight = 1f;    // 柱高，公尺；只有一個浮點時是物體的高度
+[SerializeField] float buoyancyRatio = 2f;   // 全部泡進水裡時，浮力是重量的幾倍
+[SerializeField] float waterDrag = 8f;       // 水的阻力，1 / 秒；越大越快停下來
+…
+void FixedUpdate()
+{
+    if (!WaterBody.TryFind(transform.position, out WaterBody water))
+    {
+        return;
+    }
+    Vector3 point = transform.position;
+    float bottom = point.y - 0.5f * columnHeight;
+    float submerged = Mathf.Clamp01((water.GetSurfaceHeight(point) - bottom) / columnHeight);
+    Vector3 lift = -Physics.gravity * (body.mass * buoyancyRatio * submerged);
+    Vector3 drag = -body.linearVelocity * (body.mass * waterDrag * submerged);
+    body.AddForce(lift + drag, ForceMode.Force);
+}
+```
+
+- 新增欄位 `waterDrag`，就是 $b$。
+- `lift` 是[第一步](#第一步：一個浮點，讓方塊浮起來)的浮力，`drag` 是阻力；兩個力加在一起，一次 `AddForce`。
+- 方塊在水面上時 `submerged` 是 0，兩個力都是 0，只剩重力。
+
+### 阻力該設多大
+
+$b$ 越大，每一下拿走越多。同樣底面離水面 1 公尺放手、靜止的水面，換幾個 $b$：
+
+| $b$ | 最深時中心在水面下 | 回彈時中心在水面上 | 停在 1 公分內要多久 |
+| --- | --- | --- | --- |
+| 0 | 1.5 m | 1.5 m | 不會停 |
+| 4 | 0.64 m | 0.24 m | 4.7 秒 |
+| 8 | 0.42 m | 5 公分 | 2.5 秒 |
+| 12 | 0.29 m | 5 毫米 | 1.6 秒 |
+| 18 | 0.18 m | 不回彈 | 2.0 秒 |
+
+<ex-fig of="buoyancy-drag-settle-curves" caption="示意：同樣的放手高度，換不同的水的阻力 b (垂直方向比上一張放大)" />
+
+$b$ 從 0 加大，回彈很快變小，停得也越快。但過了某個大小就不再回彈，再加大反而更慢：阻力也擋住方塊浮回平衡高度的那段，它只能慢慢爬回去 ($b = 18$ 比 $b = 12$ 慢)。阻力大的方塊，對浪的反應也跟著變鈍，水面已經升起來了，它還慢吞吞地沒跟上。預設用 8：回彈只有幾公分、兩三秒就停，浪來時也跟得上。換成別的物體時怎麼挑，見「深入」的[「換一個物體時，阻力怎麼挑」](#換一個物體時，阻力怎麼挑)。
+
+### 現在應該看到
+
+- Height Scale 還是 0：方塊落水，沉到中心在水面下約 0.4 公尺 (頂面還露在水面上)，浮上來時稍微超過一點，兩三秒內停在中心和水面同高，半泡在水裡。
+- Play 中在 Inspector 把 Water Drag 改成 0：方塊又像[第一步](#第一步：一個浮點，讓方塊浮起來)那樣一直彈。改回 8。(元件上的值在停止 Play 後會自動還原。)
+- 停止 Play，Height Scale 改回 1，再按 Play：方塊跟著浪起伏，水線在方塊的側面上下移動，不會整顆沉下去，也不會跳出水面。
+- 但方塊一直是水平的：浪的斜坡經過時，水面斜了，方塊沒有跟著斜。
+- 停止 Play，把方塊的 Rotation Z 改成 20 再按 Play：方塊斜著落水，之後一直斜 20 度浮著，不會轉正。改回 0。
+
+| 看到的現象 | 原因通常是 | 怎麼修 |
+| --- | --- | --- |
+| 方塊還是一直彈 | Water Drag 是 0，或 `AddForce` 只傳了 `lift` | 對照上面的程式 |
+| 方塊越彈越高，最後飛出去 | `drag` 少了前面的負號，阻力變成往速度的方向推 | 補上負號 |
+| 方塊一碰水就幾乎停住，像撞上一層泥 | Water Drag 填得太大 (例如 80) | 改回 8 |
+
+### 為什麼不會傾斜
+
+到這裡，方塊落水後很快就停下來，也跟著浪上下起伏；但它不會跟著水面傾斜，斜著放下去也不會轉正。因為 `AddForce` 把力加在重心上，力穿過重心，只會推著方塊移動、不會讓它轉；而且只有一個浮點，只查得到中心這一處的水面，水面斜不斜它根本不知道。
+
+要讓方塊轉，得在不同位置加上大小不同的力；要知道該轉向哪邊，得知道好幾處的水面。所以下一步把浮點換成好幾個，每個點各自查水面，力加在各自的位置上。
+
+## 第三步：多個浮點，跟著水面傾斜
+
+### 每個浮點各查各的、各推各的
+
+**一個浮點只知道一處的水面，力又穿過重心，方塊怎樣都不會轉。這一步把浮點換成四個，放在方塊的四個角：每個點各自查水面高度、各自算泡進水裡幾成，各自在自己的位置推一把。水面斜的時候，低處那側的點泡得深、推得大，高處那側推得小，兩側推力不同，方塊就轉向和水面平行。阻力也改成在每個點各自算，方塊轉動時才擋得住，晃一兩下就停。**
+
+<ex-fig of="buoyancy-one-vs-four-points-tilt" caption="示意：方塊還水平、水面斜 12 度的那一刻。箭頭長度和推力成正比" />
+
+下面依序展開：四個浮點放在哪、各分多少；力加在不同位置為什麼會讓方塊轉；阻力為什麼也要逐點算；最後的程式。
+
+### 浮點放在哪、各分多少
+
+四個浮點放在方塊半高處的四個角，用方塊自己的座標寫是 $(\pm 0.5,\ 0,\ \pm 0.5)$：
+
+- **放在角上**：四個點離得越遠，取樣的水面越涵蓋整顆方塊，兩側的深淺差也越大，轉得越明顯。
+- **放在半高處**：每個點的柱子以它為中心、高 $H_{\text{col}}$，放在半高處，柱子就從方塊的底面延伸到頂面。Column Height 還是方塊的高度 1，泡進水裡的比例和[第二步](#第二步：加上水的阻力)算法相同。
+- **每個點分到四分之一**：浮力和阻力都乘上 $1/4$。四個點泡得一樣深時，加起來就是[第二步](#第二步：加上水的阻力)的那一個力，所以上下的運動和[第二步](#第二步：加上水的阻力)一樣。
+
+用上圖算一次：方塊水平、中心在水面，水面斜 12 度 (坡度 0.22)。左右兩側的角離中心水平 0.5 公尺，左側那裡的水面比中心高 $0.22 \times 0.5 = 0.11$ 公尺，右側低 0.11 公尺：
+
+- 左側兩個點：$f_{\text{sub}} = 0.5 + 0.11 = 0.61$，推力 $2 \times \beta \times \tfrac{1}{4} \times 0.61 = 0.61$ 倍重量。
+- 右側兩個點：$f_{\text{sub}} = 0.5 - 0.11 = 0.39$，推力 $0.39$ 倍重量。
+
+加起來還是 1 倍重量，所以方塊不會整顆上下動；但左邊推得比右邊大，左側被抬起、右側往下，方塊轉向和水面平行。轉到和水面平行時，四個角泡得一樣深，推力相等，就不再轉。
+
+簡化：實際上水壓在方塊泡在水裡的每一處都有，四個點只是在四處取樣。點越多越接近，但每多一個點，每一步就多一次水面查詢 (一次 `GetSurfaceHeight` 呼叫 5 次 `WaveOffset`)。
+
+### AddForceAtPosition：力加在哪裡，決定轉不轉
+
+力不穿過重心時，除了推動物體，還會產生讓它繞重心轉的 [[torque]] (力矩)。
+
+加在指定位置的力，用 `Rigidbody.AddForceAtPosition`：
+
+```csharp Rigidbody.AddForceAtPosition()
+public void AddForceAtPosition(Vector3 force, Vector3 position, ForceMode mode);
+```
+
+| 參數 | 型別 | 用途 |
+| --- | --- | --- |
+| `force` | `Vector3` | 力，world space |
+| `position` | `Vector3` | 力作用的位置，world space |
+| `mode` | `ForceMode` | 和 `AddForce` 相同，這裡用 `ForceMode.Force` |
+
+它把力拆成兩份效果：一份和 `AddForce` 一樣推動重心，一份依位置算出 torque 讓物體轉。位置應該大約在物體的表面上；離物體太遠時，算出的 torque 會大得不合理。四個角都在方塊的邊上，符合這個條件。
+
+### 阻力也要逐點算
+
+如果阻力還照[第二步](#第二步：加上水的阻力)，用方塊的速度 `linearVelocity` 加在重心，方塊上下的運動停得下來，左右的搖晃卻停不了。方塊繞著重心轉的時候，重心幾乎不動，`linearVelocity` 接近 0，阻力也接近 0。斜 20 度放進靜止的水裡，方塊會在左右各 20 度之間來回擺，每趟約 1.2 秒，30 秒後還擺 10 度左右；慢慢變小只是靠 Rigidbody 內建的 **Angular Damping** (舊名 Angular Drag，不分在不在水裡的旋轉阻力)，它的預設值很小。
+
+轉動時，一側的角往下、另一側往上，每個角各有自己的速度。所以阻力改成在每個點用那個點的速度算，加在那個點上：往下的角被往上擋，往上的角被往下擋，兩個擋法都在阻止轉動。
+
+點的速度用 `Rigidbody.GetPointVelocity`：
+
+```csharp Rigidbody.GetPointVelocity()
+public Vector3 GetPointVelocity(Vector3 worldPoint);
+```
+
+| 參數 | 型別 | 用途 |
+| --- | --- | --- |
+| `worldPoint` | `Vector3` | 物體上的一點，world space |
+| 回傳值 | `Vector3` | 那一點此刻的速度，world space；包含移動與轉動 |
+
+每個點的阻力是
+
+$$\mathbf{a}_{\text{drag},i} = -\,\tfrac{1}{4}\,b\,f_{\text{sub},i}\,\mathbf{v}_{\text{pt},i}$$
+
+$f_{\text{sub},i}$、$\mathbf{v}_{\text{pt},i}$ 是第 $i$ 個點泡進水裡的比例與速度。方塊沒在轉時，四個點的速度都等於 $\mathbf{v}_{\text{body}}$，四份加起來就是[第二步](#第二步：加上水的阻力)的阻力。
+
+### Buoyancy.cs：最後的版本
+
+```csharp Assets/Water/Scripts/Buoyancy.cs Buoyancy
+using UnityEngine;
+
+namespace Water
+{
+    // 掛在有 Rigidbody 的物體上，讓它浮在水面上，跟著波浪起伏、傾斜。
+    // 每個浮點代表物體裡一根垂直的柱子 (高 columnHeight，中心在浮點)：
+    //   浮力：柱子泡進水裡幾成，就往上推幾成；全部泡進去時，所有浮點加起來是重量的 buoyancyRatio 倍。
+    //   阻力：和浮點的速度反向、成正比，也乘上泡進水裡的比例，讓物體停下來，不一直彈跳、搖晃。
+    // 每個浮點各自查水面高度，力加在各自的位置上，所以浮點泡得深淺不同時，物體自然傾斜。
+    // 水面高度來自 WaterBody (TryFind 找出所在的湖，GetSurfaceHeight 查高度)；不在任何一片湖上時只受重力。
+    [RequireComponent(typeof(Rigidbody))]
+    public class Buoyancy : MonoBehaviour
+    {
+        // 浮點的位置，物體自己的座標。預設是 1 公尺方塊半高處的四個角
+        [SerializeField] Vector3[] points =
+        {
+            new Vector3(-0.5f, 0f, -0.5f),
+            new Vector3(0.5f, 0f, -0.5f),
+            new Vector3(-0.5f, 0f, 0.5f),
+            new Vector3(0.5f, 0f, 0.5f),
+        };
+        [SerializeField] float columnHeight = 1f;    // 每根柱子的高度，公尺；通常是物體的高度
+        [SerializeField] float buoyancyRatio = 2f;   // 全部泡進水裡時，浮力是重量的幾倍；靜止時泡進水裡 1 / buoyancyRatio
+        [SerializeField] float waterDrag = 8f;       // 水的阻力，1 / 秒；越大越快停下來
+
+        Rigidbody body;
+
+        void Awake()
+        {
+            body = GetComponent<Rigidbody>();
+        }
+
+        void FixedUpdate()
+        {
+            if (points.Length == 0 || !WaterBody.TryFind(transform.position, out WaterBody water))
+            {
+                return;
+            }
+            float height = Mathf.Max(columnHeight, 0.01f);   // 保險：柱高是 0 時會除以 0
+            float share = 1f / points.Length;                // 每個浮點分到的份量
+
+            for (int i = 0; i < points.Length; i++)
+            {
+                Vector3 point = transform.TransformPoint(points[i]);
+                float bottom = point.y - 0.5f * height;
+                float submerged = Mathf.Clamp01((water.GetSurfaceHeight(point) - bottom) / height);
+                if (submerged <= 0f)
+                {
+                    continue;
+                }
+                Vector3 lift = -Physics.gravity * (body.mass * buoyancyRatio * share * submerged);
+                Vector3 drag = -body.GetPointVelocity(point) * (body.mass * waterDrag * share * submerged);
+                body.AddForceAtPosition(lift + drag, point, ForceMode.Force);
+            }
+        }
+
+        // 選取物體時在 Scene 視窗畫出浮點 (青色小球)。只在 Editor 畫。
+        void OnDrawGizmosSelected()
+        {
+            Gizmos.color = Color.cyan;
+            for (int i = 0; i < points.Length; i++)
+            {
+                Gizmos.DrawSphere(transform.TransformPoint(points[i]), 0.05f);
+            }
+        }
+    }
+}
+```
+
+- `points` 是浮點在物體自己座標裡的位置，Inspector 裡可以改個數與位置 (例：長條的船沿著船身多排幾個點)；預設就是方塊的四個角。
+- `transform.TransformPoint` 把物體自己座標裡的點換成 world space，跟著物體的位置、旋轉與 Scale 走；它和 Wave Height Query 用過的 `InverseTransformPoint` 方向相反。方塊轉了，四個點跟著轉，查水面、加力都在轉過之後的位置。
+- 找湖只用方塊的中心找一次，四個點都查同一片湖。
+- `share` 是 $1/4$；浮力與阻力都乘上它，一次 `AddForceAtPosition` 加在那個點上。
+- 某個點的柱子整根在水面上時跳過它：沒有浮力也沒有阻力。
+- `height` 防止 Column Height 填 0 時除以 0。
+- `OnDrawGizmosSelected` 在選取物體時，在 Scene 視窗每個浮點的位置畫一顆青色小球，不按 Play 也看得到。
+
+### 放進 Scene
+
+存檔回到 Unity，方塊的 `Buoyancy` 多了 **Points** (4 個) 與 **Water Drag**，數字都不用改。選取方塊，Scene 視窗裡方塊半高處的四個角各有一顆青色小球 (看不到時，確認 Scene 視窗上方的 Gizmos 是開著的)。
+
+換成別的物體時，四個欄位這樣填：
+
+| 欄位 | 怎麼填 |
+| --- | --- |
+| Points | 物體外緣、半高處的幾個點，用物體自己的座標 (跟著 Scale 縮放)；左右、前後對稱 |
+| Column Height | 物體的高度，world 的公尺 |
+| Buoyancy Ratio | 靜止時想泡進水裡幾成，取倒數：泡一半填 2，泡四分之一填 4 |
+| Water Drag | 從 8 開始：還在彈就加大，跟不上浪就減小 |
+
+### 現在應該看到
+
+- Height Scale 改成 0，方塊的 Rotation Z 改成 20，按 Play：方塊斜著落水，落水後 1 秒左右轉回水平 (稍微轉過頭幾度)，停在半泡在水裡的高度。停止 Play，Rotation Z 改回 0、Height Scale 改回 1。
+- Height Scale 1：方塊跟著浪起伏，浪的斜坡經過時，跟著前後左右傾斜。傾斜的角度和那裡水面的坡度差不多，預設的浪最陡時約 20 度。
+- 選取方塊：四顆青色小球跟著方塊起伏、傾斜。
+
+| 看到的現象 | 原因通常是 | 怎麼修 |
+| --- | --- | --- |
+| 方塊不會傾斜，和[第二步](#第二步：加上水的阻力)一樣 | 還是用 `AddForce`，或四個點都在 (0, 0, 0) | 改用 `AddForceAtPosition`，對照預設的 Points |
+| 方塊一直左右搖晃，停不下來 | 阻力用的是 `linearVelocity`，不是 `GetPointVelocity(point)` | 對照上面的程式 |
+| 靜止的水上，方塊停下來時斜向一邊 | Points 不對稱，例如有一個點的 Y 不是 0 | 對照預設的 Points |
+| 方塊翻過去，邊角朝上浮著 | Water Drag 是 0，晃動越來越大 | 改回 8 |
+| 方塊靠近湖邊時突然往下掉 | 方塊的中心離開了水面的範圍，`TryFind` 找不到湖 | 在湖的範圍內測 |
+
+## 回頭看
+
+### 接回開頭的問題
+
+開頭的問題是：查得到水面高度，方塊卻還是穿過水面沉下去。一路下來：
+
+| 步驟 | 解決的 | 留下的東西 |
+| --- | --- | --- |
+| [第一步](#第一步：一個浮點，讓方塊浮起來) | 方塊會沉 | 浮點與它的柱子：$f_{\text{sub}} = \operatorname{clamp}((y_{\text{surf}} - y_{\text{bot}}) / H_{\text{col}},\ 0,\ 1)$，浮力加速度 $\beta\,f_{\text{sub}}\,g$；在 `FixedUpdate` 裡用 `AddForce` 每一步加一次 |
+| [第二步](#第二步：加上水的阻力) | 一直彈跳 | 水的阻力 $-b\,f_{\text{sub}}\,\mathbf{v}_{\text{body}}$：永遠和速度反向，只拿走、不還回 |
+| [第三步](#第三步：多個浮點，跟著水面傾斜) | 不會傾斜 | 四個浮點各自查水面，浮力與阻力 (用 `GetPointVelocity`) 各乘 $1/4$，用 `AddForceAtPosition` 加在各自的位置 |
+
+浮力讓方塊停在泡進 $1/\beta$ 的高度，但它只看高度，所以像彈簧一樣把能量還回來；阻力只拿走、不還回，方塊才停得下來；浮點有好幾個、力加在各自的位置上，兩側泡得深淺不同時推力就不同，方塊自然轉向和水面平行。
+
+### 檢查點：方塊跟著波浪起伏、傾斜
+
+做對時你會看到：
+
+- 靜止的水面 (Height Scale 0)：方塊從水面上方落水，沉一段、浮上來稍微超過一點，兩三秒內停在半泡在水裡的高度。
+- 斜 20 度放下去：落水後 1 秒左右轉回水平。
+- Height Scale 1：方塊跟著浪起伏，水線在方塊側面上下移動；浪的斜坡經過時跟著傾斜，最多約 20 度。
+- 把方塊的 Mass 改成 10 再按 Play：動作和 Mass 1 時一樣。改回 1。
+- 調效果用 Scene 視窗；最後用角色的攝影機在 Game 視窗確認一次。
+
+| 看到的現象 | 原因通常是 | 回到哪一步 |
+| --- | --- | --- |
+| 方塊穿過水面沉到湖底 | 沒掛 `Buoyancy`，或方塊不在水面的範圍內 | [第一步](#第一步：一個浮點，讓方塊浮起來) |
+| 一直彈跳 | Water Drag 是 0，或阻力沒加進去 | [第二步](#第二步：加上水的阻力) |
+| 越彈越高、飛出去 | 阻力的正負號反了 | [第二步](#第二步：加上水的阻力) |
+| 不會傾斜，斜著放下也不會轉正 | 只有一個浮點，或用 `AddForce` 加在重心 | [第三步](#第三步：多個浮點，跟著水面傾斜) |
+| 一直左右搖晃 | 阻力用的是 `linearVelocity` | [第三步](#第三步：多個浮點，跟著水面傾斜) |
+
+**對應 Final Demo**：「浮標會跟著波浪上下起伏、左右傾斜」的做法；下一章把它用在浮標上。
+
+此時你的專案裡，以下檔案應該和教材 GitHub repo 的[範例程式碼](https://github.com/RogelioKG/explain-waterbody/tree/main/urp-water/unity)相同：
+
+- `Assets/Water/Scripts/Buoyancy.cs` (這一章新增)
+- `Assets/Water/Scripts/WaterBody.cs`、`WaterSettings.cs`、`WaterMesh.cs`、`WaterHeightProbe.cs` (這一章沒有改它們)
+
+方塊在你的 Scene 裡，不在 repo 裡。`SO_LakeWater` 的 Height Scale 記得改回 1。
+
+### 自我檢查
+
+::: q 把 Buoyancy Ratio 從 2 改成 4，方塊靜止時浮在多高？落水後彈跳的情形會怎麼變？
+靜止時 $a_y = \beta\,f_{\text{sub}}\,g - g = 0$，所以 $f_{\text{sub}} = 1/\beta = 1/4$：只有底下四分之一泡在水裡，中心在水面上 0.25 公尺。
+
+彈跳會變多。泡在水裡的部分變少，而阻力乘著 $f_{\text{sub}}$，靜止附近的阻力只剩 $\beta = 2$ 時的一半；同時每往下多泡一點，浮力增加得比 $\beta = 2$ 時多一倍，推回來得更用力。推回的力變大、擋住的力變小，同一個 $b$ 會回彈得更多，要再加大 Water Drag 才會像原本一樣快停。
+:::
+
+::: q 把方塊的 Mass 從 1 改成 10，浮的高度和動作會變嗎？為什麼？
+不會變。因為浮力和阻力都寫成「質量 × 加速度」，重力的加速度也和質量無關，所以方塊的加速度只由 $\beta$、$f_{\text{sub}}$、$b$ 決定。
+
+這也表示 Buoyancy Ratio 才是「這個物體比水輕多少」，Mass 只影響它撞到別的 Rigidbody 時誰推得動誰。
+:::
+
+::: q 只留兩個浮點，左前 $(-0.5,\ 0,\ 0.5)$ 和右前 $(0.5,\ 0,\ 0.5)$，方塊會怎樣？
+兩個點都在前半，浮力只加在重心前方 0.5 公尺的地方，產生讓前側抬起、後側下沉的 torque，方塊往後翻。後側沉下去時沒有點去查、去推，所以擋不住。
+
+一直翻到前面朝上、兩個點正好在重心正上方，才停得住：這時推力穿過重心，不再產生 torque；而且力在重心上方往上撐，像掛在鉤子上的東西，偏一點就被拉回來。兩個點各泡一半，推力加起來剛好等於重量，所以兩個點就在水面上，方塊整顆沉在水裡，原本的前面朝上、和水面齊平。
+
+要前後也平衡，前後兩側都要有點，而且對稱於重心。
+:::
+
+### 下一步
+
+- 下一章 [Fishing Bobber](fishing-bobber.html) 把這個元件用在浮標上：浮標漂浮，咬鉤時下沉，有釣線。
+
+### 請回報
+
+以下是官方文件沒有寫清楚、需要你在 Unity 裡看一眼的事：
+
+| # | 去哪裡看 | 回報什麼 |
+| --- | --- | --- |
+| 1 | 每一步改完程式後的 Console | 有沒有紅字或黃字，有的話第一行是什麼 |
+| 2 | 方塊的 Rigidbody Inspector；Project Settings > Physics 的 Gravity | Linear Damping、Angular Damping、Interpolate 的預設值；Gravity 的值 |
+| 3 | [第一步](#第一步：一個浮點，讓方塊浮起來)：Height Scale 0，底面離水面約 1 公尺放手 | 每次是否都彈回差不多放手的高度；一趟大約幾秒 |
+| 4 | [第二步](#第二步：加上水的阻力)：Height Scale 0，同樣的放手高度 | 最深時頂面有沒有沒入水面；回彈幾下、幾秒後停住 |
+| 5 | [第三步](#第三步：多個浮點，跟著水面傾斜)：Rotation Z 20 放下 | 大約幾秒轉回水平 |
+| 6 | [第三步](#第三步：多個浮點，跟著水面傾斜)：Height Scale 1，盯著方塊看十幾秒 | 傾斜看起來是否跟著水面；方塊的動作看起來是否一頓一頓 (畫面的格數高於每秒 50 時) |
+
+## 深入
+
+### 換一個物體時，阻力怎麼挑
+
+在靜止的平衡高度附近，可以把方塊的運動寫成簡單的式子。設中心比平衡高度高 $\Delta y$，柱子還沒整根出水或整根泡進去時，$f_{\text{sub}} = 1/\beta - \Delta y / H_{\text{col}}$；阻力裡的 $f_{\text{sub}}$ 取平衡時的 $1/\beta$。代進 $a_y = \beta\,f_{\text{sub}}\,g - g - b\,f_{\text{sub}}\,v_y$：
+
+$$a_y = -\frac{g\,\beta}{H_{\text{col}}}\,\Delta y \;-\; \frac{b}{\beta}\,v_y$$
+
+$v_y$ 是方塊往上的速度。第一項是彈簧：離平衡越遠，拉回來越大；第二項是阻力。這種「彈簧 + 和速度成正比的阻力」的運動，物理課的結論 (當黑盒子) 是：阻力項的係數達到彈簧項係數平方根的 2 倍時，物體回到平衡時剛好不越過去；比這小就會回彈，比這大就不回彈、但回得更慢。代進來：
+
+$$\frac{b}{\beta} \ge 2\sqrt{\frac{g\,\beta}{H_{\text{col}}}} \quad\Longrightarrow\quad b \ge 2\,\beta\,\sqrt{\frac{g\,\beta}{H_{\text{col}}}}$$
+
+1 公尺見方、$\beta = 2$ 的方塊：$2 \times 2 \times \sqrt{9.81 \times 2 / 1} \approx 17.7$，和「阻力該設多大」的表一致：$b = 12$ 還回彈 5 毫米，$b = 18$ 不回彈。預設的 8 大約是它的一半，留一點回彈，換來對浪比較靈敏的反應。換成別的物體時，先用這條式子算出不回彈的 $b$，再取它的一半左右開始調。$\beta$ 越大 (越輕) 或 $H_{\text{col}}$ 越小 (越扁)，需要的 $b$ 越大。
+
+### 形狀複雜的物體：每個浮點各帶柱高與份量
+
+`points` 是陣列，個數與位置都能在 Inspector 改，長條的船沿著船身多排幾個點就行。但所有浮點共用一個 Column Height，每個點又平分 `1 / points.Length`，所以有兩件事表示不了：物體各處的厚度不同，以及各處排開的水量不同 (寬處多、窄處少，只能靠在寬處排密一點來湊)。方塊和浮標上下一樣粗，共用柱高、平分剛好準確，所以主線用這個寫法。
+
+要表示這兩件事，就讓每個浮點各帶自己的柱高與份量。因為一根柱子整根泡進去時排開的水和它的體積成正比，所以份量取這根柱子佔物體體積的比例 (它代表的底面積 × 柱高 ÷ 物體體積)；這些比例加起來是 1，全部泡進水裡時浮力加起來就仍是 $\beta$ 倍重量。位置放在那根柱子的中點，因為柱底是從浮點往下半個柱高算的。例：一艘中段厚、兩頭薄的小船，沿船身排三個點：
+
+| 浮點 | 柱高 | 代表的底面積 | 柱子體積 | 份量 |
+| --- | --- | --- | --- | --- |
+| 船頭 | 0.5 m | 1 m² | 0.5 m³ | $0.5 / 3 = 1/6$ |
+| 船身中段 | 1 m | 2 m² | 2 m³ | $2 / 3$ |
+| 船尾 | 0.5 m | 1 m² | 0.5 m³ | $0.5 / 3 = 1/6$ |
+
+```csharp Assets/Water/Scripts/Buoyancy.cs Buoyancy.FloatPoint、FixedUpdate() (每個浮點各帶柱高與份量)
+[System.Serializable]
+public struct FloatPoint
+{
+    public Vector3 position;   // 物體自己的座標，放在這根柱子的中點
+    public float height;       // 柱高，公尺：物體在這一點上下的厚度
+    public float share;        // 份量：這根柱子佔物體體積的比例；所有浮點加起來是 1
+}
+
+[SerializeField] FloatPoint[] points =
+{
+    new FloatPoint { position = new Vector3(-0.5f, 0f, -0.5f), height = 1f, share = 0.25f },
+    new FloatPoint { position = new Vector3(0.5f, 0f, -0.5f), height = 1f, share = 0.25f },
+    new FloatPoint { position = new Vector3(-0.5f, 0f, 0.5f), height = 1f, share = 0.25f },
+    new FloatPoint { position = new Vector3(0.5f, 0f, 0.5f), height = 1f, share = 0.25f },
+};
+[SerializeField] float buoyancyRatio = 2f;
+[SerializeField] float waterDrag = 8f;
+…
+for (int i = 0; i < points.Length; i++)
+{
+    Vector3 point = transform.TransformPoint(points[i].position);
+    float height = Mathf.Max(points[i].height, 0.01f);   // 保險：柱高是 0 時會除以 0
+    float share = points[i].share;
+    float bottom = point.y - 0.5f * height;
+    …
+}
+```
+
+- `FloatPoint` 加上 `[System.Serializable]`，Inspector 才會把陣列的每一格展開成 Position、Height、Share 三欄。
+- `columnHeight` 欄位拿掉；迴圈裡的 `height`、`share` 改讀各自的值，迴圈前算 `height`、`share` 的兩行也拿掉，其餘和主線相同。預設的四個點和主線的設定等價。
+- 下一章照主線的版本寫；改用這個版本的話，下一章填 Column Height 的地方，改成把每個點的 Height 填成浮標的高度。
+
+點數就是成本的旋鈕：每個浮點每一步查一次 `GetSurfaceHeight` (5 次 `WaveOffset`)，手排的點數由你決定，不會因為模型複雜就暴增。更準的做法有兩種，這裡不展開：從 Collider 自動在物體內部排滿格點當浮點；照 mesh 的三角形和水面切開，逐片算水壓。
+
+## 來源
+
+### 官方文件
+
+縮寫：`SR` = `https://docs.unity.com/en-us/engine/6000.3/script-reference/unityengine`，`M` = `https://docs.unity.com/en-us/engine/6000.3/manual` (都是 Unity 6000.3)。
+
+- `Rigidbody.AddForce` (`ForceMode.Force` 的速度改變是 force × DT / mass；力累積到 `FixedUpdate` 之後的物理模擬才套用)：`SR/rigidbody/addforce`；`ForceMode.Force`：`SR/forcemode/force`
+- `Rigidbody.AddForceAtPosition` (同時產生力與 torque；位置應大約在物體表面上)：`SR/rigidbody/addforceatposition`
+- `Rigidbody.GetPointVelocity` (含角速度)：`SR/rigidbody/getpointvelocity`
+- `Rigidbody.linearVelocity`、`Rigidbody.linearDamping` (每步 `linearVelocity *= (1 - linearDamping * dt)`)、`Rigidbody.angularDamping`、`Rigidbody.mass`：`SR/rigidbody/linearvelocity`、`SR/rigidbody/lineardamping`、`SR/rigidbody/angulardamping`、`SR/rigidbody/mass`
+- Rigidbody 元件的欄位 (Mass 預設 1、Use Gravity 預設勾選)：`M/physics-section/physics-overview/rigidbody/class-rigidbody`
+- `MonoBehaviour.FixedUpdate` (預設每 0.02 秒、一秒 50 次；施加力用 FixedUpdate)：`SR/monobehaviour/fixedupdate`
+- `Time.time` (在 FixedUpdate 中回傳 `Time.fixedTime`)：`SR/time/time`
+- `Physics.gravity`：`SR/physics/gravity`；Physics 設定的 Gravity：`M/unity-editor/editor-settings-reference/comp-manager-group/class-physics-manager`
+
+### 數字
+
+- 「阻力該設多大」的表、各步「現在應該看到」的秒數與深度、斜 20 度轉回水平的時間、跟著浪傾斜的角度、阻力加在重心時的擺動：用這一章最後版本的算法 (與第一、二步的版本) 在 Python 裡模擬，每步 0.02 秒，先更新速度再更新位置，水面用 `WaterBody.GetSurfaceHeight` 的同一套算法與預設的 4 個波；Angular Damping 取 0.05 (Unity 的實際預設值見「請回報」第 2 項)。沒有在 Unity 裡實際跑過
+- 傾斜的示意圖與算例：水面坡度 0.22 (約 12 度) 直接計算
+- 不回彈的阻力 $b \ge 2\beta\sqrt{g\beta/H_{\text{col}}}$：由平衡附近的線性式子計算
+</script>
+<script>
+explainer({
+  title: 'Buoyancy',
+  assumes: ['Unity 編輯器的基本操作 (看完 Unity Learn 的 Basic 與 Creative Core)', 'C# 基礎', { t: 'Wave Height Query (WaterBody.TryFind、GetSurfaceHeight)', href: 'wave-height-query.html' }, { t: 'Reflection (做完的湖)', href: 'reflection.html' }, { t: 'URP Waterbody (總覽)', href: 'urp-water.html' }],
+  approach: '重新發明：先讓方塊靠一個浮點浮起來，再由「一直彈跳」帶出水的阻力，最後由「不會傾斜」帶出多個浮點',
+  env: 'Windows 11、Unity 6000.3.20f1 (英文介面)、URP 17.3',
+  terms: {
+    'Rigidbody': '剛體：掛上它，物體就交給物理系統，每一小段時間依受到的力更新速度、位置與旋轉',
+    '浮點': '查水面高度、算浮力的位置；代表物體裡一根以它為中心、高 Column Height 的垂直柱子',
+    'torque': '力矩：力加在離重心有一段距離的地方時，讓物體繞重心轉的效果；大小是力 × 重心到力的作用線的距離',
+  },
+});
+</script>
+</body>
+</html>

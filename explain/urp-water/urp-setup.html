@@ -1,0 +1,748 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>URP Setup</title>
+<script src="../_explainer/explainer.js"></script>
+</head>
+<body>
+<script type="text/markdown" id="ex-content">
+## 這一章要做什麼
+
+### 做完會有什麼
+
+水要有東西襯著才看得出對錯：要有由淺到深的湖底，有穿出水面和沉在水裡的東西，還要能飛到水面、潛到水下去看。這一章把這些都準備好：
+
+- 一個用 Universal 3D 範本建立的練習專案，`Assets/` 底下分成「帶走」「示範」「練習」三塊
+- 一片用 Terrain 挖出的湖：岸、一圈緩坡、中央深 5 公尺
+- 幾顆石頭與幾條魚的替身 (參照物)
+- 一片平的水面，由腳本產生，格數可調；水體的資料夾自成一個程式集 (`Water.asmdef`)，不會偷偷依賴示範湖
+- 在場景裡逛的兩種方式：Scene 視窗的飛行，和你自己的第三人稱角色
+- 匯入專案、還沒打開的官方水體範例
+
+每一步之後有「現在應該看到」。幾個段落結束時有檢查點：做對時的現象、預期與常見錯誤並排的示意圖、看到錯誤時對照原因的表，以及此時哪些檔案應該和教材 GitHub repo 的[範例程式碼資料夾](https://github.com/RogelioKG/explain-waterbody/tree/main/urp-water/unity)裡的相同。
+
+## 建立練習專案
+
+### 用 Universal 3D 範本建專案
+
+1. 在 Unity Hub 建立專案
+
+   Unity Hub > Projects 分頁 > New project。編輯器版本選 6000.3.20f1，範本選 **Universal 3D** (已經設定好 URP 的空 3D 專案；不是 Universal 3D sample)。填專案名稱 (例如 `WaterPractice`) 與位置，按 Create project。
+
+2. 現在應該看到
+
+   Unity 編輯器打開專案，Project 視窗的 `Assets` 底下有一個 `Settings` 資料夾。
+
+### 建好資料夾、存下 Scene
+
+整份文檔做完時，`Assets/` 會長這樣 (括號是第幾章建立)：
+
+```text
+Assets/
+├── Water/                       水體系統本身，要帶走，只有它會進正式專案
+│   ├── Water.asmdef              (3)  讓 Water/ 的腳本自成一個程式集，不能引用外面的類別
+│   ├── Scripts/                  (3)  WaterMesh.cs、WaterSettings.cs、WaterBody.cs
+│   └── Shaders/                  (5)  SG_Water.shadergraph、GerstnerWaves.hlsl
+├── LakeDemo/                    示範用的湖，可刪
+│   ├── Lake.unity                (3)
+│   ├── TD_Lake.asset             (3)  Terrain 的地形資料，建 Terrain 時產生，拖進這裡後改名
+│   ├── SO_LakeWater.asset        (5)  這片湖的水的設定
+│   ├── Materials/                (3)  M_Terrain、M_WaterTemp、M_Rock、M_Fish；(5) M_LakeWater
+│   └── Models/                   (3)  你自己的石頭、魚 .fbx (SM_Rock、SM_Fish)
+├── ShaderGraphPractice/         Shader Graph 的操作練習，練習作品不會用在水上，可整包刪
+├── Samples/                     Unity 匯入官方範例時自動建立
+├── Settings/                    專案範本附的 URP 設定
+└── <character>/                 你的角色與它的套件，照套件預設的位置
+```
+
+`Water/` 不能引用另外兩個資料夾裡的東西，這一點由下面的 `Water.asmdef` 擋住。
+
+1. 在 Project 視窗建立這一章要用的三個資料夾：`Assets/Water/Scripts/`、`Assets/LakeDemo/Materials/`、`Assets/LakeDemo/Models/`
+
+2. 把目前的 Scene (場景：Unity 裡放 GameObject 的空間) 另存成 `Assets/LakeDemo/Lake.unity`
+
+3. 現在應該看到
+
+   Hierarchy 最上面的 Scene 名稱變成 `Lake`。這一章要用到一盞 Directional Light，Scene 裡沒有的話建立一個。範本附的 Main Camera 先留著，放進角色後再刪。
+
+已經用別的資料夾結構建好的，在 Project 視窗用拖曳和改名整理，不要在檔案總管搬：`.meta` 檔記著每個資產的 GUID，在檔案總管搬會讓 Scene 和 Material 找不到它們。
+
+### 打開 Depth Texture 與 Opaque Texture
+
+水面之後要讀出「後面的東西離多遠」和「後面長什麼樣子」，URP 要先準備好這兩樣資料：[[depth texture]] 和 [[opaque texture]]。它們的開關在 [[URP Asset]] 裡。
+
+1. 找出專案裡所有的 URP Asset
+
+   在 Project 視窗的搜尋欄輸入 `t:universalrenderpipelineasset`。結果可能不只一個 (不同畫質等級可以用不同的 URP Asset)，**每一個都要打開**，這樣不管用的是哪個畫質等級都是開的。
+
+2. 逐一打開開關
+
+   點選一個 URP Asset，在 Inspector 的 **Rendering** 區塊勾選 **Depth Texture** 和 **Opaque Texture**。同一區塊的 Opaque Downsampling 不動。每一個 URP Asset 都做一次。
+
+3. 現在應該看到
+
+   每個 URP Asset 的兩個開關都是勾選的。畫面不會有變化，要等水面的 shader 去讀它們才看得出作用。
+
+### Scene 視窗開 Always Refresh
+
+水面之後會隨時間動，Scene 視窗預設不會一直重畫，看起來會是靜止的。
+
+1. Scene 視窗的 **View Options** [[overlay]] > **Effects** 下拉選單 > 勾選 **Always Refresh**
+
+2. 現在應該看到
+
+   Always Refresh 是勾選的。現在還沒有會動的東西，畫面看起來一樣。
+
+## 用 Terrain 挖出湖
+
+### 湖要長什麼樣子
+
+<ex-fig of="lake-terrain-section" at="1" caption="湖的剖面 (示意，垂直方向放大 2.5 倍)。岸在 Y = 1，水面在 Y = 0，中央最深處在 Y = −5" />
+
+| 位置 | world position 的 Y | 為什麼 |
+| --- | --- | --- |
+| 岸 | 1 | 比水面高 1 公尺，岸上是乾的 |
+| 水邊線 | 0 | 水面高度。湖裡任一點的 Y 直接就是負的水深 |
+| 緩坡 | 0 到 −1.5 | 一段夠寬的淺水，水的顏色才有由淺到深的變化 |
+| 最深處 | −5 | 夠深，從水面上往下看會看不到底 |
+
+### 建立 Terrain 並設定位置與尺寸
+
+1. 建立 Terrain
+
+   GameObject > 3D Object > **Terrain**。
+
+   現在應該看到：Scene 視窗多了一大塊平的地形，Hierarchy 多了一個 `Terrain`，Project 視窗多了一個 Terrain Asset。把它拖進 `Assets/LakeDemo/`，它是這片湖的地形資料，改名為 `TD_Lake`。
+
+2. 把 Transform 的 Position 設成 (0, −10, 0)
+
+   [[Terrain]] 不能被雕到低於自己的 Transform Position Y。放在 Y = 0 就挖不出低於水面的湖底；放在 −10，湖底的 −5 就在範圍內。
+
+3. 設定尺寸
+
+   選取 Terrain，Inspector 的工具列點 **Terrain Settings** (齒輪圖示)，在 **Mesh Resolution** 區段設定：
+
+   | 欄位 | 值 | 意思 |
+   | --- | --- | --- |
+   | Terrain Width | 100 | X 方向 100 公尺 |
+   | Terrain Length | 100 | Z 方向 100 公尺 |
+   | Terrain Height | 20 | 地形最高能比 Terrain GameObject 高多少：−10 + 20 = 10，岸的 1 在範圍內 |
+
+   這三個值要在雕刻之前設好，之後再改，雕好的地形會跟著縮放。
+
+4. 現在應該看到
+
+   地形變成 100 × 100 公尺，還是平的，大約在 Y = −10 的高度。
+
+### 整塊抬高到 Y = 1
+
+地形現在在它能到的最低點，要先整塊抬到岸的高度，才能往下挖。
+
+1. 選 Set Height 工具
+
+   Inspector 的工具列點 **Paint Terrain** (筆刷圖示)，工具下拉選單選 **Set Height**。同樣的工具與欄位也可能出現在 Scene 視窗的 overlay 裡，用哪一邊都可以。
+
+2. 設定 Space 為 **World**、Height 為 **1**
+
+3. 按 **Flatten Tile**
+
+   它會把整塊地形一次改成指定的高度，抹平所有起伏。只在這裡用，之後挖湖時不要按到。
+
+4. 現在應該看到
+
+   地形整塊跳到 Y = 1。Terrain GameObject 的 Transform Position Y 仍然是 −10。
+
+### 挖出湖
+
+1. 選 Raise or Lower Terrain，調大筆刷
+
+   工具下拉選單選 **Raise or Lower Terrain**，在 Scene 視窗的地形上按住滑鼠拖曳就會改變高度。
+
+   筆刷的欄位是 **Brush Size** (大小) 和 **Opacity** (強度)，也可以用快捷鍵：`[`、`]` 縮小、放大 Brush Size，`-`、`=` 降低、提高 Opacity。先把筆刷圓圈調到約地形寬度的一半，Opacity 調低。
+
+2. 往下挖
+
+   在地形中央**按住 Shift 拖曳**，地形往下凹。來回刷幾次，做出一個碗形凹地，水邊線 (碗壁和 Y = 0 交會的那一圈) 直徑約 50 公尺。深度先不用管。
+
+   如果 Shift 沒有讓地面變低，用 Ctrl+Z 復原，整個湖改用下一步的 Set Height 筆刷挖。
+
+3. 用 Set Height 筆刷把湖底修到 −5
+
+   切回 **Set Height**，Space 保持 World，Height 改成 **−5**。這次**不要按 Flatten Tile**，直接在湖中央刷：刷過的地方會變成 −5。筆刷調小到約湖寬的三分之一，刷出一塊平的湖底，挖得太深的地方也會被拉回 −5。
+
+   如果上一步是改用 Set Height 挖：先用 Height −1.5、大筆刷刷出整個湖，再用 Height −5、小筆刷刷中央，得到兩層台階。
+
+4. 用 Smooth Height 把坡磨順
+
+   工具下拉選單選 **Smooth Height**，在碗壁和台階的邊緣來回刷，刷到水邊往內有一圈緩坡，再往中央才變陡。
+
+5. 量深度
+
+   選 Set Height，**按住 Shift 點擊地形**，Height 欄位會變成那一點的高度 (裝了 Terrain Tools 套件時改按 Ctrl)。量完把 Height 改回要刷的值。
+
+6. 檢查地形的顏色
+
+   地形有隨坡度變化的明暗就不用動。如果是一片粉紅色：在 `Assets/LakeDemo/Materials/` 建立 Material `M_Terrain`，Shader 選 **Universal Render Pipeline/Terrain/Lit**，再到 Terrain Settings 的 **Material** 區段，用 Material 欄位旁的選取圓圈選它。
+
+### 檢查點：湖挖好了
+
+做對時你會看到：
+
+- Scene 視窗把視角放低到和岸齊平，中央一個碗形凹地；從水邊往內先是一圈緩坡，再往中央變陡。
+- 用 Set Height 取樣：岸上約 1，中央約 −5，水邊往內 5 到 8 公尺處約 −1 到 −1.5。
+- 地形不是粉紅色。
+- Terrain 的 Transform Position 是 (0, −10, 0)。
+
+<ex-fig of="lake-terrain-side-view-check" caption="從側面看挖好的湖 (示意)。左：預期。中、右：最常見的兩種錯誤" />
+
+| 看到的現象 | 原因通常是 | 怎麼修 |
+| --- | --- | --- |
+| 按住 Shift 拖曳，地面不會變低 | 沒做「整塊抬高」，或降低鍵不是 Shift | 確認做過 Flatten Tile 到 Height 1；仍不行就用 Set Height 筆刷挖 |
+| 整塊地形突然變成同一個高度 | 在 Set Height 按到 Flatten Tile | Ctrl+Z 復原 |
+| 湖中央取樣低於 −5 | Raise or Lower Terrain 挖過頭 | 用 Height −5 的 Set Height 筆刷刷回來 |
+| 坑壁直上直下，沒有淺水帶 | 沒磨坡 | 用 Smooth Height 刷碗壁 |
+| 按住 Shift 點擊後 Height 欄位沒變 | 裝了 Terrain Tools 套件 | 改按 Ctrl 點擊 |
+| 地形是粉紅色 | Material 不是 URP 的 Terrain Lit | 照第 6 步換 Material |
+
+此時還沒有任何腳本。
+
+## 擺石頭與魚的替身
+
+### 替身只是參照物
+
+石頭和魚是用來判斷水對不對的參照物：半泡在水裡的石頭，水面碰到它的地方之後會長出泡沫；沉在水裡的石頭，透過水面看會被扭曲；放在不同深度、不同距離的魚，用來分辨看得清和看不清。位置和數量不必照誰的安排，下面的表列出每樣東西要滿足的條件，符合就行。
+
+### 用 Lake GameObject 標出湖心與水面
+
+1. 建立空 GameObject `Lake`
+
+   從正上方看，把它拖到湖的中央，在 Inspector 把 Position 的 **Y 設成 0**。之後石頭、魚、水面都放在它底下，子 GameObject 的 Y 就是相對水面的高度：Y = −2 是水面下 2 公尺。
+
+### 石頭與魚要滿足的條件
+
+外觀隨意：壓扁的 Sphere 當石頭、躺平的 Capsule 當魚就夠了，也可以用你自己的 .fbx 模型 (見下一節)。都放在 `Lake` 底下。你挖的湖底和別人的不會一樣，照下面的條件用眼睛調位置就好。
+
+| 用途 | 條件 |
+| --- | --- |
+| 所有石頭和魚 | Material 放在 `Assets/LakeDemo/Materials/`。Shader 用 Universal Render Pipeline/Lit，Surface Type 是 **Opaque**。半透明的物體，水會把它當成不存在；需要鏤空的部分 (例如魚鰭) 用 **Alpha Clipping**：勾選後，Base Map 的 alpha 低於 **Threshold** (預設 0.5) 的像素直接丟掉 |
+| 看泡沫圈、看折射時露出部分不被拉進水裡 | 至少一顆**半泡**的石頭：頂端露出水面 (最高點的 Y 大於 0)，底部碰到湖底。最好有兩顆，一顆在水邊附近的淺水，一顆離岸較遠 |
+| 看折射的扭曲 | 至少一顆**沉底**的石頭：整顆在水面下 (最高點的 Y 小於 −1)，底部碰到湖底 |
+| 看越深越看不清 | 幾條**不同深度**的魚，例如水面下 0.5、1.5、3.5 公尺；整條在水面下，離湖底至少 0.3 公尺 |
+| 看斜看水變厚 | 幾條**同深度、不同距離**的魚，例如都在水面下 2 公尺，從岸邊看由近到遠排開 |
+| 一眼分得出看不看得到 | 魚的顏色鮮豔，例如橘色 |
+| 看起來合理、效果的尺度才對 | 尺寸以公尺為單位，接近真實大小：魚 0.3 到 1 公尺、石頭 1 到 3 公尺。Sphere 預設直徑 1 公尺、Capsule 預設高 2 公尺，Scale 就是大小 |
+
+用內建形狀的話，在 `Assets/LakeDemo/Materials/` 建一個灰色的 Material `M_Rock` 給石頭、一個鮮豔橘色的 `M_Fish` 給魚。
+
+<ex-fig of="lake-terrain-section" at="3" caption="湖的剖面加上石頭與魚 (示意，垂直方向放大 2.5 倍)。示意圖這樣擺；你的位置不同時，對應找同類的物件" />
+
+現在還沒有水，石頭有沒有露出水面先靠 Y 值判斷，下一節蓋上水面後再用眼睛確認。
+
+### 用自己的 .fbx 模型
+
+用你自己的石頭、魚模型 (.fbx，檔名照慣例用 `SM_Rock`、`SM_Fish`) 時，照下面四步，讓它們符合上面的條件：
+
+1. 決定檔案放哪裡
+
+   - 自己捏的 (例如用 Blender)：放 `Assets/LakeDemo/Models/`。
+   - 從 Asset Store 或套件來的：留在套件自己的資料夾，不要搬。套件更新時會在原位置再裝一份，你搬走的那份就變成重複的。
+
+2. 把材質從 .fbx 裡拿出來
+
+   在 Project 視窗選取 .fbx，Inspector 切到 **Materials** 分頁，按 **Extract Materials**，存到 `Assets/LakeDemo/Materials/`。留在 .fbx 裡的材質是唯讀的，改不了；拿出來之後才能改 Shader 和顏色。
+
+   現在應該看到：`Assets/LakeDemo/Materials/` 多了模型的 Material。把它們改名為 `M_Rock`、`M_Fish`。
+
+3. 把 Material 改成 URP 的 Lit
+
+   選取拿出來的 Material，Shader 改成 Universal Render Pipeline/Lit，Surface Type 設成 **Opaque**。鏤空的部分照上面的條件用 Alpha Clipping。
+
+   模型來自 Built-in Render Pipeline、Material 很多或預覽是粉紅色時，可以用 Render Pipeline Converter 一次轉：
+
+   1. 先備份專案，轉換不能復原
+   2. Window > Rendering > **Render Pipeline Converter**
+   3. 轉換類型選 **Built-In Render Pipeline to URP**，勾選 **Material Upgrade**
+   4. 按 **Initialize Converters**，檢查清單
+   5. 按 **Convert Assets**
+
+   預覽縮圖不對時，在 Project 視窗按右鍵選 **Reimport All**。素材附的是自己寫的 shader 時，轉換後仍可能是粉紅色，這時手動把 Material 的 Shader 改成 Universal Render Pipeline/Lit，重新指定 texture。
+
+4. 確認尺寸
+
+   尺寸的條件見上表：Unity 的 1 個單位是 1 公尺。從 Blender 匯出 FBX 時，在匯出視窗的 **Transform** 區勾選 **Apply Transform**。拖進 Scene、Scale 是 (1, 1, 1) 時，大小應該接近真實大小，可以拿預設直徑 1 公尺的 Sphere 比。如果差了 100 倍，選取 .fbx，在 Inspector 的 **Model** 分頁調 **Scale Factor**。
+
+## 用腳本產生水面 mesh
+
+### 為什麼不用內建的 Plane
+
+水面的波浪是靠移動 [[mesh]] 的 vertex 做出來的。只有 vertex 會動，vertex 之間的三角形是平的，所以 vertex 越密，起伏越平滑。
+
+內建的 Plane 只有 10 × 10 格，放大到蓋住這片湖 (60 公尺) 時每格 6 公尺。下圖是同一個波長 6 公尺的波，在三種格子密度下做得出來的形狀：
+
+<ex-fig of="mesh-density-wave-sampling" caption="同一個波 (虛線) 被三種密度的 mesh sample。mesh 只能在 vertex (圓點) 的位置跟著波動，vertex 之間是直線" />
+
+- 每格 6 公尺：每個 vertex 都落在波峰上，整片水面只會一起上下。
+- 每格 1.5 公尺：看得出波，但是一節一節的折線。
+- 每格 0.3 公尺：和真正的波幾乎重合。
+
+所以水面用腳本產生，預設 60 × 60 公尺、200 × 200 格，每格 0.3 公尺。
+
+### 建立 Water.asmdef
+
+先讓 `Assets/Water/` 自成一個 [[assembly]]，再放腳本進去。Assembly Definition 資產 (副檔名 `.asmdef`) 放在資料夾的根，這個資料夾和它底下沒有自己 asmdef 的子資料夾的腳本，就會編成同一個程式集。
+
+規則是：自訂的程式集不能引用 Unity 預設那一個 (`Assets/` 裡其他沒有 asmdef 的腳本都在裡面)，要用別的程式集只能自己加進 asmdef 的引用清單。`Water` 的清單現在是空的，所以 `Assets/Water/` 裡的腳本一用到外面的東西 (示範湖或角色的腳本) 就編譯失敗，Water 不會偷偷依賴示範湖。
+
+1. 在 Project 視窗選取 `Assets/Water/`，選單 Assets > Create > Scripting > **Assembly Definition**
+
+   命名為 `Water`，按 Enter。
+
+2. 在 Inspector 確認
+
+   選取剛建好的 `Water`：**Name** 是 `Water`，**Assembly Definition References** 清單是空的，其他設定不動。**Auto Referenced** 預設是勾選的，所以你放在 `Assets/` 其他地方的腳本還是用得到 `Water` 的類別，被擋的只有反方向。
+
+3. 現在應該看到
+
+   `Assets/Water/` 底下多了一個 `Water` (Assembly Definition 資產，檔名 `Water.asmdef`)，Unity 重新編譯一次，Console 沒有紅字。資料夾裡還沒有腳本，如果 Console 有黃色警告提到這個程式集沒有腳本，等下一步建好 `WaterMesh.cs` 就會消失。
+
+完整檔案在 教材 GitHub repo 的 [`Assets/Water/Water.asmdef`](https://github.com/RogelioKG/explain-waterbody/blob/main/urp-water/unity/Assets/Water/Water.asmdef)。
+
+### WaterMesh.cs：類別與欄位
+
+在 `Assets/Water/Scripts/` 建立 `WaterMesh.cs`，完整檔案在 教材 GitHub repo 的 [`Assets/Water/Scripts/WaterMesh.cs`](https://github.com/RogelioKG/explain-waterbody/blob/main/urp-water/unity/Assets/Water/Scripts/WaterMesh.cs)。下面逐段看。
+
+```csharp Assets/Water/Scripts/WaterMesh.cs WaterMesh (類別與欄位)
+using System.Collections.Generic;
+using UnityEngine;
+using UnityEngine.Rendering;
+
+namespace Water
+{
+    [ExecuteAlways]
+    [RequireComponent(typeof(MeshFilter), typeof(MeshRenderer))]
+    public class WaterMesh : MonoBehaviour
+    {
+        const int MaxCellsPerSide = 1000;
+
+        [SerializeField] Vector2 size = new Vector2(60f, 60f);          // 水面的寬 (X) 與長 (Z)，公尺
+        [SerializeField] Vector2Int cells = new Vector2Int(200, 200);   // X 與 Z 方向各切幾格
+        [SerializeField] bool logBuildInfo = true;                      // 重建時在 Console 印出格數與頂點數
+
+        Mesh mesh;
+        bool dirty;
+        …
+```
+
+- `[ExecuteAlways]`：讓腳本在 Edit mode 也執行。不按 Play，Scene 視窗裡就看得到水面。
+- `[RequireComponent(...)]`：加入這個腳本時，自動加上 MeshFilter (存放 mesh) 和 MeshRenderer (把 mesh 畫出來)。
+- `size`、`cells`：水面多大、切幾格。Inspector 裡兩者都顯示 X、Y 兩欄，Y 那一欄代表 Z 方向。
+- `MaxCellsPerSide`：每邊最多 1000 格，避免誤填過大的數字。
+- `logBuildInfo`：每次重建在 Console 印一行格數與 vertex 數，檢查點會用到。
+
+### 什麼時候重建 mesh
+
+```csharp Assets/Water/Scripts/WaterMesh.cs OnEnable() / OnValidate() / Update()
+void OnEnable()
+{
+    Build();
+}
+
+void OnValidate()
+{
+    // OnValidate 只做標記，真正的重建留到下一次 Update
+    dirty = true;
+}
+
+void Update()
+{
+    if (dirty)
+    {
+        dirty = false;
+        Build();
+    }
+}
+```
+
+1. `OnEnable`：GameObject 啟用時 (載入 Scene、按 Play) 產生一次。
+2. `OnValidate`：Inspector 的值改變時 Unity 會呼叫它，但載入 Scene、匯入資產時也會呼叫，官方把它定位成檢查欄位用。所以這裡只做標記。
+3. `Update`：Edit mode 下，Scene 有變動而重畫時會呼叫。看到標記就重建。
+
+### 產生 vertex 與 UV
+
+```csharp Assets/Water/Scripts/WaterMesh.cs Build() (前半)
+if (mesh == null)
+{
+    mesh = new Mesh();
+    mesh.name = "WaterMesh (generated)";
+}
+
+int cellsX = Mathf.Clamp(cells.x, 1, MaxCellsPerSide);
+int cellsZ = Mathf.Clamp(cells.y, 1, MaxCellsPerSide);
+int vertsX = cellsX + 1;
+int vertsZ = cellsZ + 1;
+int vertexCount = vertsX * vertsZ;
+
+mesh.indexFormat = vertexCount > 65535 ? IndexFormat.UInt32 : IndexFormat.UInt16;
+
+var vertices = new List<Vector3>(vertexCount);
+var uvs = new List<Vector2>(vertexCount);
+for (int z = 0; z < vertsZ; z++)
+{
+    for (int x = 0; x < vertsX; x++)
+    {
+        float u = (float)x / cellsX;
+        float v = (float)z / cellsZ;
+        vertices.Add(new Vector3((u - 0.5f) * size.x, 0f, (v - 0.5f) * size.y));
+        uvs.Add(new Vector2(u, v));
+    }
+}
+```
+
+1. 建立 Mesh
+
+   第一次呼叫時建立，之後重建都用同一個。
+
+2. vertex 數比格數多 1
+
+   200 格需要 201 個 vertex (格子的兩端都要有)，200 × 200 格是 201 × 201 = 40401 個 vertex。
+
+3. 決定 [[index format]]
+
+   三角形是用 vertex 的編號記錄的，`Mesh.indexFormat` 決定編號用幾位元存：
+
+   ```csharp UnityEngine.Mesh indexFormat
+   public IndexFormat indexFormat { get; set; }
+   ```
+
+   | 值 | 最多幾個 vertex |
+   | --- | --- |
+   | `IndexFormat.UInt16` (預設) | 65535 |
+   | `IndexFormat.UInt32` | 約 40 億 |
+
+   40401 個 vertex 用 16 位元就夠；300 × 300 格是 301 × 301 = 90601 個，要用 32 位元。
+
+   設定 `indexFormat` 會清空 mesh 原有的三角形，所以這一行要在設定三角形之前。這也剛好避免格數改小時，舊的三角形指向已經不存在的 vertex。
+
+4. vertex 的位置
+
+   `u`、`v` 是 vertex 在整片水面上的比例 (0 到 1)。乘上 `size` 再減一半，mesh 就以 GameObject 的位置為中心：`x = 0` 時 X = (0 − 0.5) × 60 = −30，`x = 200` 時 X = 30，相鄰 vertex 差 60 ÷ 200 = 0.3 公尺。所有 vertex 的 Y 都是 0，水面高度就是 GameObject 的 Y。
+
+5. UV
+
+   UV 是 texture 上的座標，(0, 0) 對應 texture 左下角。直接用 `u`、`v`，一張 texture 剛好鋪滿整片水面。
+
+### 把每一格切成兩個三角形
+
+```csharp Assets/Water/Scripts/WaterMesh.cs Build() (三角形)
+var triangles = new int[cellsX * cellsZ * 6];
+int t = 0;
+for (int z = 0; z < cellsZ; z++)
+{
+    for (int x = 0; x < cellsX; x++)
+    {
+        int bottomLeft = z * vertsX + x;
+        int bottomRight = bottomLeft + 1;
+        int topLeft = bottomLeft + vertsX;
+        int topRight = topLeft + 1;
+
+        // 從上方 (+Y) 往下看是順時針
+        triangles[t++] = bottomLeft;
+        triangles[t++] = topLeft;
+        triangles[t++] = bottomRight;
+
+        triangles[t++] = bottomRight;
+        triangles[t++] = topLeft;
+        triangles[t++] = topRight;
+    }
+}
+```
+
+第 `z` 列第 `x` 個 vertex 的編號是 `z * vertsX + x`：往右一個 +1，往上一列 +`vertsX`。以 200 格為例，最左下那一格：
+
+<ex-fig of="mesh-cell-two-triangles" caption="最左下那一格 (cells = 200，vertsX = 201) 的四個 vertex 與兩個三角形" />
+
+每格兩個三角形、每個三角形 3 個編號，所以陣列長度是格數 × 6：200 × 200 格是 80000 個三角形、240000 個編號。
+
+三個編號的順序決定哪一面是正面。這裡讓從上方看是順時針，正面朝上。如果之後從上面看不到水面、從水下往上才看得到，就是方向反了：把每組的第 2、3 個編號對調。
+
+### 交給 Mesh
+
+```csharp Assets/Water/Scripts/WaterMesh.cs Build() (後半)
+mesh.SetVertices(vertices);
+mesh.SetUVs(0, uvs);
+mesh.SetTriangles(triangles, 0, true, 0);
+mesh.RecalculateNormals();
+
+GetComponent<MeshFilter>().sharedMesh = mesh;
+
+if (logBuildInfo)
+{
+    Debug.Log($"WaterMesh: {cellsX} x {cellsZ} cells, {vertexCount} vertices, index format {mesh.indexFormat}", this);
+}
+```
+
+1. `SetVertices`
+
+   ```csharp UnityEngine.Mesh SetVertices
+   public void SetVertices(List<Vector3> inVertices);
+   ```
+
+   把 vertex 位置複製進 mesh，取代原有的 vertex。
+
+2. `SetUVs`
+
+   ```csharp UnityEngine.Mesh SetUVs
+   public void SetUVs(int channel, List<Vector2> uvs);
+   ```
+
+   | 參數 | 型別 | 用途 |
+   | --- | --- | --- |
+   | `channel` | `int` | 第幾組 UV，0 到 7。0 是一般 texture 用的 UV0 |
+   | `uvs` | `List<Vector2>` | 每個 vertex 一個 UV |
+
+3. `SetTriangles`
+
+   ```csharp UnityEngine.Mesh SetTriangles
+   public void SetTriangles(int[] triangles, int submesh, bool calculateBounds, int baseVertex);
+   ```
+
+   | 參數 | 型別 | 用途 |
+   | --- | --- | --- |
+   | `triangles` | `int[]` | 每 3 個編號一個三角形 |
+   | `submesh` | `int` | 寫進第幾個 submesh。只有一個，填 0 |
+   | `calculateBounds` | `bool` | 是否重算包住整片 mesh 的範圍 (bounds)。填 true |
+   | `baseVertex` | `int` | 每個編號再加上的值。填 0 |
+
+   `int[]` 這個版本沒有預設值，四個參數都要寫。先設 vertex、再設三角形。
+
+4. `RecalculateNormals`
+
+   依三角形算出每個 vertex 的 normal。水面是平的，normal 全部朝上。
+
+5. 指派給 MeshFilter
+
+   `sharedMesh` 是 MeshFilter 用的那份 mesh。這裡指派的是腳本自己建的 mesh，只有這片水面在用。不用 `MeshFilter.mesh`，因為它被讀取時會自動複製一份。
+
+6. 印一行紀錄
+
+   第二個參數 `this` 讓你在 Console 點這一行時，Hierarchy 標出是哪個 GameObject 印的。
+
+### 掛上 Scene
+
+1. 建立水面 GameObject
+
+   在 `Lake` 底下建立空的子 GameObject `WaterSurface`，Position (0, 0, 0)、Rotation (0, 0, 0)、Scale (1, 1, 1)。
+
+2. Add Component > `WaterMesh`
+
+   現在應該看到：Console 印出 `WaterMesh: 200 x 200 cells, 40401 vertices, index format UInt16`，湖的位置出現一片平面。還沒有 Material，它可能是粉紅色。
+
+3. 做一個暫時的水面 Material
+
+   在 `Assets/LakeDemo/Materials/` 建立 Material `M_WaterTemp`：
+
+   | 欄位 | 值 |
+   | --- | --- |
+   | Shader | Universal Render Pipeline/Lit |
+   | Surface Type | Transparent |
+   | Blending Mode | Alpha |
+   | Base Map 的顏色 | 藍色，alpha 約 0.5 |
+
+   alpha 0.5 讓水面半透明，看得到水下的石頭和魚。之後會換成自製的水面 shader。
+
+4. 把 `M_WaterTemp` 指派給 WaterSurface 的 MeshRenderer
+
+<ex-fig of="lake-terrain-section" at="4" caption="水面 mesh (虛線) 比湖寬：伸進岸下的部分被比它高 1 m 的地形蓋住，只有湖裡看得到" />
+
+水面是比湖大的正方形，不必配合湖的形狀：伸進岸下的部分被地形擋住。
+
+### 檢查點：水面蓋上了
+
+做對時你會看到：
+
+- Console 有一行 `WaterMesh: 200 x 200 cells, 40401 vertices, index format UInt16`。
+- 把 Cells 改成 (300, 300)，Console 印出 `WaterMesh: 300 x 300 cells, 90601 vertices, index format UInt32`。改回 (200, 200)。
+- 從上方斜看：湖裡一片半透明的藍色水面，邊緣停在水邊線，岸上是乾的。
+- 你擺的半泡石頭穿出水面；透過水面看得到沉底的石頭和橘色的魚。
+- 把視角移到水面下往上看，看不到水面。這是正常的：Material 預設只畫正面。
+- WaterSurface 的 world Y 是 0。
+
+<ex-fig of="water-mesh-side-view-check" caption="蓋上水面後從側面看 (示意)。左：預期。中、右：最常見的兩種錯誤" />
+
+| 看到的現象 | 原因通常是 | 怎麼修 |
+| --- | --- | --- |
+| 水面是一片粉紅色 | MeshRenderer 沒有 Material | 指派 `M_WaterTemp` |
+| 從上面看不到水面，從水下往上看反而看得到 | 三角形的 vertex 順序反了 | 把每組的第 2、3 個編號對調 |
+| 岸上也是一片水 | `Lake` 或 `WaterSurface` 的 Y 不是 0 | 兩者的 Y 都設成 0 |
+| 水面不透明，看不到魚 | Surface Type 還是 Opaque，或 alpha 是 1 | 改成 Transparent、alpha 0.5 |
+| 水面沒蓋滿湖 | `Lake` 沒放在湖中央，或 Size 太小 | 移動 `Lake`，或把 Size 調大 |
+| 半泡的石頭沒露出水面，或魚浮在水上 | 石頭或魚的 Y 不對 | 照「石頭與魚要滿足的條件」表調 Y |
+| Console 沒有 WaterMesh 那一行 | Log Build Info 沒勾，或腳本有編譯錯誤 | 看 Console 有沒有紅字；勾回 Log Build Info |
+| Console 紅字：找不到某個型別或命名空間 | 少寫了 `using`，或用到 `Assets/Water/` 以外的類別 (`Water.asmdef` 不讓它引用外面) | 補上 `using`；外面的類別不要用，也不要在 asmdef 加引用去指向示範湖 |
+| 改了 Cells，Console 沒有印新的一行 | Edit mode 下要等 Scene 重畫 | 在 Scene 視窗點一下或移動視角 |
+
+此時 [`Assets/Water/Scripts/WaterMesh.cs`](https://github.com/RogelioKG/explain-waterbody/blob/main/urp-water/unity/Assets/Water/Scripts/WaterMesh.cs) 與 [`Assets/Water/Water.asmdef`](https://github.com/RogelioKG/explain-waterbody/blob/main/urp-water/unity/Assets/Water/Water.asmdef) 應該和教材 GitHub repo 裡對應的檔案相同。
+
+## 在場景裡逛：Scene 視窗與你的角色
+
+### 用 Scene 視窗飛行
+
+Scene 視窗的攝影機可以貼近水面、半入水、潛到水下，不用另外做攝影機。調效果的時候就用它。
+
+1. 滑鼠移到 Scene 視窗，按住滑鼠右鍵
+
+   這會進入 Flythrough mode。按住右鍵的同時操作：
+
+   | 操作 | 做什麼 |
+   | --- | --- |
+   | 移動滑鼠 | 轉向 |
+   | W、S | 往前、往後 |
+   | A、D | 往左、往右 |
+   | Q、E | 往下、往上 |
+   | 按住 Shift | 加速 |
+   | 滾輪 | 調整飛行速度 |
+
+   飛行速度也可以在 Scene 視窗 View Options overlay 的 **Camera Speed** 調。
+
+2. 現在應該看到
+
+   低頭按住 W 一路往下：穿過水面，到了水下看得到石頭、魚和湖底；往上看看不到水面 (正常)。按 Play 之後 Scene 視窗仍然可以這樣飛。
+
+每個檢查點做完，最後換成角色的攝影機，在 Game 視窗再確認一次。
+
+### 放進你的第三人稱角色
+
+1. 把角色 (連同它的攝影機) 拖進 Scene，放在湖外的岸上
+
+   角色需要的套件 (例如 Cinemachine) 照你原本專案的做法裝。`Assets/Water/` 裡的腳本不要引用這些套件。
+
+2. 場景只留角色的攝影機
+
+   把 Scene 裡原本的 Main Camera 刪掉。一個 Scene 只能有一個 AudioListener，兩台攝影機各帶一個就重複了。
+
+3. 確認角色攝影機的 **Depth Texture** 和 **Opaque Texture**
+
+   選取角色那邊帶有 **Camera Component** 的 GameObject (用 Cinemachine 時，選帶 Camera Component 的那一個，不是 Cinemachine 自己的 GameObject)。Camera Component (元件：附在 GameObject 上的功能) 的這兩個欄位是 Use Pipeline Settings 或 On；是 Off 的話改成 Use Pipeline Settings。
+
+4. 按 Play 確認角色能走
+
+   現在應該看到：Game 視窗的畫面是角色的攝影機；角色能走、能跑，動畫正常，站在地形上不會掉下去。角色不會游泳，走進湖裡會走在湖底。
+
+### 檢查點：能在場景裡逛
+
+做對時你會看到：
+
+- Scene 視窗按住右鍵，低頭按 W：穿過水面，水下看得到石頭、魚和湖底。
+- 按 Play：Game 視窗是角色的攝影機畫面，角色能走。
+- Hierarchy 裡只有角色那一台 Camera，Console 沒有紅字。
+
+| 看到的現象 | 原因通常是 | 怎麼修 |
+| --- | --- | --- |
+| Scene 視窗按住右鍵，視角沒有飛 | Scene 視窗在 2D 模式 (右鍵變成平移) 或 Orthographic 模式 (右鍵變成環繞) | 切回 3D 與 Perspective |
+| W、A、S、D 沒反應 | 沒有一直按住右鍵 | 按住右鍵再按 |
+| 飛得太快或太慢 | 飛行速度不適合 | 飛行時用滾輪調，或調 View Options overlay 的 Camera Speed |
+| 按 Play 後 Game 視窗一片黑 | Scene 裡沒有啟用的攝影機 | 確認角色的攝影機 GameObject 是啟用的；Main Camera 刪掉前先確認角色已經在 Scene 裡 |
+| Console 警告 AudioListener 太多，或 Game 視窗的畫面被別台攝影機蓋住 | 原本的 Main Camera 還在 | 刪掉 Main Camera |
+
+## 匯入官方的水體範例
+
+### 匯入步驟
+
+Shader Graph 附了一組範例 Production Ready Shaders，裡面有幾個水體 shader (WaterLake 等)。先匯入放著，不用打開。
+
+1. Window > Package Management > **Package Manager**，在清單裡選 **Shader Graph**
+
+2. 在 **Samples** 區找到 **Production Ready Shaders**，按 **Import**
+
+   它依賴的兩個共用範例會一起匯入。
+
+3. 現在應該看到
+
+   Project 視窗多了 `Assets/Samples/Shader Graph/<版本>/`。在 Project 視窗搜尋 `WaterLake` 找得到 `WaterLake.shadergraph`。
+
+4. 現在先不要打開它的 Scene (第 11 章會帶你看)，也不要把它的檔案搬進 `Assets/Water/`
+
+## 回頭看
+
+### 最終檢查點
+
+整章做完時：
+
+- `Lake` Scene 裡有：Terrain 挖出的湖 (岸 Y = 1、中央 Y = −5)；`Lake` 底下有半泡與沉底的石頭、不同深度與不同距離的魚、`WaterSurface`；你的角色與它的攝影機 (沒有別的 Camera)。
+- Scene 視窗看得到半透明的水面停在水邊線，半泡的石頭穿出水面。
+- 在 Scene 視窗按住右鍵飛行，能穿過水面到水下；按 Play 時 Game 視窗是角色的攝影機。
+- Project 視窗有 `Assets/Water/Water.asmdef`、`Assets/LakeDemo/Lake.unity`。
+- Project 視窗有 `Assets/Samples/Shader Graph/<版本>/`。
+- 這一章不完成 Final Demo 的任何一條。
+
+以下兩個檔案應該和教材 GitHub repo 裡的相同：[`Assets/Water/Scripts/WaterMesh.cs`](https://github.com/RogelioKG/explain-waterbody/blob/main/urp-water/unity/Assets/Water/Scripts/WaterMesh.cs)、[`Assets/Water/Water.asmdef`](https://github.com/RogelioKG/explain-waterbody/blob/main/urp-water/unity/Assets/Water/Water.asmdef)。
+
+### 下一步
+
+下一章是 [Shader Graph](shader-graph.html)：替這片水面做第一個自己的 shader，換掉暫時的 `M_WaterTemp`。
+
+### 請回報
+
+以下是官方文件沒有寫清楚、需要你在 Unity 裡看一眼的事，都不需要懂 shader：
+
+| # | 去哪裡看 | 回報什麼 |
+| --- | --- | --- |
+| 1 | Project 視窗的 `Assets/Settings/` (含子資料夾)；再搜尋 `t:universalrenderpipelineasset` | `Assets/Settings/` 底下所有檔案的名稱；有幾個 URP Asset；每個 URP Asset 的 Renderer List 裡列的是哪個 Renderer |
+| 2 | 剛建立 Terrain 時的 Scene 視窗；Terrain Settings 的 Material 區段 | 地形是不是粉紅色；Material 欄位顯示的 Material 名稱 |
+| 3 | 挖湖時的 Raise or Lower Terrain | 按住 Shift 拖曳是不是降低；不是的話用哪個鍵；Brush Size 與 Opacity 在 Inspector 還是在 Scene 視窗的 overlay |
+| 4 | 建立 `Water.asmdef` 時的 Assets > Create 選單；用文字編輯器打開建好的 `Water.asmdef`；Console | 選單路徑是不是 Scripting > Assembly Definition；檔案裡有哪些欄位；資料夾裡還沒有腳本時 Console 有沒有警告，警告的第一行 |
+| 5 | 按 Play 後，在 Scene 視窗按住右鍵飛行 | Scene 視窗能不能照常飛行 |
+| 6 | 你的 .fbx 的 Inspector：Materials 分頁 | 還沒按 Extract Materials 前，材質欄位是不是灰的、不能改；按下去之後有沒有跳出選資料夾的視窗 |
+| 7 | 拖進 Scene 的 .fbx，Scale 是 (1, 1, 1) | 大小是不是接近真實大小；需要調 Scale Factor 時，改成了多少 |
+| 8 | 你的角色的 Hierarchy | 帶 Camera Component 的 GameObject 名稱；角色有沒有用 Cinemachine |
+| 9 | 匯入 Production Ready Shaders 後的 Project 視窗與 Console | `WaterLake.shadergraph` 的完整路徑；Console 有沒有紅字，有的話第一行是什麼 |
+
+## 來源
+
+### 官方文件
+
+縮寫：`M` = `https://docs.unity.com/en-us/engine/6000.3/manual`，`S` = `https://docs.unity.com/en-us/engine/6000.3/script-reference/unityengine`。
+
+- 用 URP 範本建專案：https://docs.unity.com/en-us/engine/6000.3/manual/render-pipelines/universal-render-pipeline/introduction/installing-and-configuring-urp/creating-a-urp-project/creating-a-new-project-with-urp
+- Universal 3D 範本的 Renderer 位置：https://docs.unity.com/en-us/engine/6000.3/manual/post-processing-and-full-screen-effects/urp/custom-post-processing/custom-effect-low-code
+- URP Asset 的 Depth Texture、Opaque Texture：https://docs.unity.com/en-us/engine/6000.3/manual/render-pipelines/universal-render-pipeline/urp-reference/universalrp-asset
+- URP Asset 與 Quality、Graphics 設定：https://docs.unity.com/en-us/engine/6000.3/manual/render-pipelines/universal-render-pipeline/introduction/installing-and-configuring-urp/creating-a-urp-project/install-urpinto-aproject
+- Camera Component 的 Depth Texture、Opaque Texture 覆寫：https://docs.unity.com/en-us/engine/6000.3/manual/cameras/urp/camera-components-reference/camera-component-reference
+- View Options overlay 的 Always Refresh：`M/working-with-scenes/scenes-manage-gameobjects/overlays/reference/view-options`
+- Terrain：`M/creating-environments/script-terrain/terrain-using-terrains`、`M/creating-environments/script-terrain/terrain-other-settings`、`M/creating-environments/script-terrain/terrain-height/terrain-basic-sculpting/terrain-set-height`、`M/creating-environments/script-terrain/terrain-height/terrain-basic-sculpting/terrain-raise-lower-terrain`、`M/creating-environments/script-terrain/terrain-height/terrain-basic-sculpting/terrain-smooth-height`
+- Raise or Lower Terrain 的 Shift (2022.3 文件)：https://docs.unity3d.com/2022.3/Documentation/Manual/terrain-RaiseLowerTerrain.html
+- Terrain Lit shader：`M/materials-and-shaders/built-in/shaders-in-universalrp/reference/shader-terrain-lit`
+- 基本 GameObject 的尺寸：`M/working-with-gameobjects/gameobject-fundamentals/primitive-objects`；Transform：`M/class-transform`
+- Mesh API：`S/mesh/setvertices`、`S/mesh/setuvs`、`S/mesh/settriangles`、`S/mesh/recalculatenormals`、`S/mesh/indexformat`；`S/meshfilter/sharedmesh`、`S/meshfilter/mesh`
+- `ExecuteAlways`、`OnValidate`、`RequireComponent`：`S/executealways`、`S/monobehaviour/onvalidate`、`S/requirecomponent`
+- Assembly Definition：`M/programming-environment/script-compilation/assembly-definition-files/assembly-definitions-creating`、`.../class-assembly-definition-importer`、`.../assembly-definitions-referencing`
+- Scene 視窗的 Flythrough mode 與飛行速度：`M/unity-editor/editor-windows-views-reference/using-the-scene-view/scene-view-navigation`
+- .fbx 匯入的 Materials 分頁、Model 分頁的 Scale Factor、匯出前的尺寸：`M/assets-and-media/asset-types/models/importing/fbximporter-materials`、`.../fbximporter-model`、`M/assets-and-media/asset-types/models/creating-dccassets/preparing`
+- Blender 匯出 FBX 的 Apply Transform (Export > Transform)：https://docs.blender.org/manual/en/5.0/files/import_export/fbx.html
+- Render Pipeline Converter：`M/render-pipelines/universal-render-pipeline/introduction/installing-and-configuring-urp/upgrading-from-birp/rp-converter`
+- URP Lit 的 Surface Options：`M/materials-and-shaders/built-in/shaders-in-universalrp/reference/lit-shader`
+- Production Ready Shaders 範例與匯入：https://docs.unity3d.com/Packages/com.unity.shadergraph@17.3/manual/Shader-Graph-Sample-Production-Ready-Water.html 、https://docs.unity3d.com/Packages/com.unity.shadergraph@17.3/manual/ShaderGraph-Samples-Import.html
+</script>
+<script>
+explainer({
+  title: 'URP Setup',
+  assumes: ['Unity 編輯器的基本操作 (看完 Unity Learn 的 Basic 與 Creative Core)', 'C# 基礎', { t: 'URP Waterbody (總覽)', href: 'urp-water.html' }],
+  approach: '動手追蹤：每一步先在 Unity 裡操作，再看現在應該看到什麼；段落結尾有檢查點',
+  env: 'Windows 11、Unity 6000.3.20f1 (英文介面)、URP 17.3、Shader Graph 17.3',
+  terms: {
+    'assembly': '程式集：C# 編譯出來的一個單位 (一個 .dll)，和 Unity 掛在 GameObject 上的 Component 是兩回事。放了 Assembly Definition 的資料夾自成一個程式集，只能用自己引用清單裡的程式集',
+    'URP Asset': 'URP 的設定檔 (一個 .asset 檔)，決定這個專案怎麼渲染，例如要不要準備 depth texture、opaque texture',
+    'depth texture': '記錄每個像素上東西遠近的圖 (代表遠近的數，換算後才是距離)，URP 在畫水之前準備好給水面讀',
+    'opaque texture': '畫 transparent 物體之前，畫面上 opaque 物體的快照',
+    'Renderer': 'URP Asset 底下的另一份設定檔，決定一幀依什麼步驟畫出來；這一章不改它',
+    'overlay': '浮在 Scene 視窗上的小工具列',
+    'Terrain': 'Unity 內建的地形 GameObject，用筆刷雕出高低；雕刻不能低於它自己的 Transform Position Y',
+    'mesh': '由 vertex 與三角形組成的形狀資料',
+    'index format': 'mesh 用幾位元記錄三角形的 vertex 編號；16 位元最多 65535 個 vertex，32 位元約 40 億',
+  },
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,480 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Official Water Sample</title>
+<script src="../_explainer/explainer.js"></script>
+</head>
+<body>
+<script type="text/markdown" id="ex-content">
+## 這一章要解決的問題
+
+### 別人的 graph 打開來是一大片線
+
+做完 [Caustics](caustics.html)，你的湖已經有波浪、深淺、泡沫、細波紋、折射、反射和湖底的焦散，每一個 node 都是你自己接的。Shader Graph 也附了官方的水體範例，打開來是一大片 node 和線，沒有人告訴你哪一塊在做什麼。
+
+這一章把官方的兩個水體 graph 一塊一塊拆開：每一塊對到你做過的哪一章、做法哪裡相同、哪裡不同、為什麼不同。目的不是改用官方的做法，你的湖照原樣，這一章不改任何檔案。目的是練一套讀別人 graph 的方法，之後看到別人的水體 shader 也拆得開。
+
+### 這一章怎麼走
+
+| 部分 | 做什麼 |
+| --- | --- |
+| 打開範例 | 找到檔案，打開 graph |
+| 讀 graph 的四個習慣 | 先看設定、從 block 往回追、看 group 與 Sticky Note、Sub Graph 當黑盒子 |
+| WaterLake | 湖：細波紋、折射、深淺、反射，逐塊對照 |
+| WaterSimple_FoamMask | 池塘：vertex wave (頂點波浪)、泡沫、Fresnel 的另一種用法 |
+| 名字一樣，意思不同 | 最容易讀錯的幾個地方 |
+| 可以借的想法 | 兩個之後可以自己接上的小技巧 |
+
+## 打開範例
+
+### 範例在哪裡
+
+[URP Setup](urp-setup.html) 已經匯入了 Shader Graph 的範例 **Production Ready Shaders**。沒匯入的話：
+
+1. Window > Package Management > **Package Manager**，在清單裡選 **Shader Graph**
+2. 在 **Samples** 區找到 **Production Ready Shaders**，按 **Import**
+
+   它依賴的兩個共用範例會一起匯入。
+
+檔案在 `Assets/Samples/Shader Graph/<版本>/` 底下，在 Project 視窗搜尋檔名就找得到。四個水體 graph 放在同一個 `Water` 資料夾，各自帶著 Material (`WaterSimple_FoamMask` 的 Material 叫 `Water` 與 `WaterMuseum`，其他和 graph 同名)：
+
+| Graph | 是什麼 | 這一章 |
+| --- | --- | --- |
+| `WaterLake` | 湖：沒有 vertex wave；捲動的 normal、折射、深淺 | 逐塊讀 |
+| `WaterSimple_FoamMask` | 池塘：3 個 Gerstner 波、岸邊泡沫、可以手繪泡沫的位置 | 讀 vertex wave 與泡沫 |
+| `WaterStream` | 溪流：用 flow map 讓波紋沿著河道流 | 不讀 |
+| `WaterStreamFalls` | 瀑布：和溪流同一套，用在瀑布的 mesh | 不讀 |
+
+溪流和瀑布的水面有坡度、有流向，湖用不到。
+
+### 打開 graph
+
+1. 雙擊 `WaterLake.shadergraph`
+
+   或選取它，按 Inspector 的 **Open Shader Editor**。
+
+2. 把自己的 `Assets/Water/Shaders/SG_Water.shadergraph` 也打開，兩個視窗並排
+
+3. 只讀不改
+
+   可以拖動、縮放、點 node 看預覽。看完直接關掉，**不要按 Save Asset**。
+
+### 看官方的水動起來 (選做)
+
+範例附了一個展示 Scene，可以看官方的水實際的樣子。
+
+1. File > **Save**，先存好自己的 `Lake` Scene
+2. Project 視窗搜尋 `URPProductionReadyShaders`，雙擊打開
+
+   另一個 `HDRPProductionReadyShaders` 是給 HDRP 的，不要開。
+
+3. 看完開回 `Assets/LakeDemo/Lake.unity`
+
+## 讀 graph 的四個習慣
+
+### 先看 Graph Settings
+
+Graph Settings 決定 block 是什麼意思。同樣是 normal，Fragment Normal Space 選 Tangent 時，block 叫 Normal (Tangent Space)，要接 tangent space 的 normal；選 World 時叫 Normal (World Space)，要接 world space 的 normal。Surface Type 和 Blending Mode 決定 Alpha 有沒有作用。所以打開別人的 graph，先點 Graph Inspector 的 **Graph Settings** 分頁看一遍，再看 node。
+
+### 從 block 往回追
+
+graph 的終點是 Vertex 和 Fragment 的幾個 block。從一個 block 沿著線往左追，追到的 node 就是「這個輸出靠什麼算出來」。一次只追一個 block，其他的先不看。
+
+沒接線的 block 也要看：它旁邊欄位裡的值就是輸出。WaterLake 的 Smoothness 沒接線，欄位填的是 1.0，這個數字決定了湖面的反射有多清楚。
+
+Material 也要看：Material 上的值優先於 graph Property 的預設值。例如 WaterLake 的 `Color` 在 graph 裡預設是 (0.75, 0.76, 0.67)，`WaterLake` Material 上改成了 (0.90, 0.91, 0.81)。
+
+### 看 group 與 Sticky Note
+
+[[group]] 是框住一群 node、上面有標題的方框；[[Sticky Note]] 是貼在 graph 上的一段文字。官方用這兩樣標出每一塊在做什麼，這是最快的地圖。WaterLake 的 group 標題是英文，例如 `Ripple UV Coordinates`、`Small Ripples`，下面的對照沿用這些標題。
+
+### Sub Graph 當黑盒子
+
+[[Sub Graph]] 在 graph 裡只是一個 node。第一次讀時只看名字和輸入輸出，當成「給它 $A$，它還你 $B$」，需要時才打開看裡面。打開的方法：Sub Graph 是另一個資產，在 Project 視窗搜尋它的名字，雙擊打開。
+
+WaterLake 用到五個：
+
+| Sub Graph | 輸入 → 輸出 | 裡面做什麼 | 你的 graph 裡對應的 |
+| --- | --- | --- | --- |
+| `ExpandVec2` | In (Vector 2) → Out | $2x - 1$：把 0 到 1 展開成 −1 到 1 | 沒有：你的細波紋 texture 以 Normal map 類型匯入，`SSG_Ripple_Layer` 裡的 Sample Texture 2D 的 Type 選 Normal 就解開了 |
+| `DistanceMask` | Distance、Offset → Out | 攝影機到這一點的距離減 Offset，除以 Distance，Saturate，再 One Minus：近處是 1，遠處是 0 | Flow Normals 的遠處淡出 |
+| `DepthFade` | Distance → Out | Scene Depth (Eye) 減 Screen Position (Raw) 的 A，除以 Distance，Saturate | `SSG_Thickness` 的 Thickness ($h$)，再除以 Distance |
+| `AlphaMerge` | RGB、Alpha → RGBA | 把三個分量和 Alpha 合成四個分量 | 沒有 |
+| `BranchOnRP` | URP、HDRP、BIRP → Out | 依目前的 render pipeline 選一個輸入 | 沒有 |
+
+`DepthFade` 的資產名是 `Depth Fade` (有空格)，它不在 `Assets/Samples` 裡，是 Shader Graph 套件本身附的 (套件的 `GraphTemplates/Subgraphs/` 資料夾)。
+
+最後兩個和水無關。官方的每個 graph 同時有 URP 和 HDRP 兩個 Target，同一份 graph 兩個 render pipeline 都能用。HDRP 讀畫面要用另一個 node HD Scene Color，所以折射那一塊有兩支，由 `BranchOnRP` 選一支，`AlphaMerge` 只是把兩支各自湊成 `BranchOnRP` 要的四個分量。讀 URP 的部分時，只看 Scene Color 那一支。
+
+## WaterLake：一塊一塊對照
+
+### 全貌
+
+照上面的習慣，先從 block 往回追一遍，得到這張圖：
+
+<ex-fig of="water-lake-sample-graph-overview" caption="WaterLake 從 block 往回追的結果。方塊的標題是官方的 group 名稱或 node 名稱" />
+
+Vertex 區沒有接線，所以 WaterLake 的水面是平的；Fragment 區有四個 block 有東西。Blackboard 上有六個 Property：
+
+| Property | 預設值 | 控制什麼 | 你的 graph 裡最接近的 |
+| --- | --- | --- | --- |
+| `RippleScale` | Vector 4 (0.45, 0.35, 0.17, 0.4) | 兩組波紋 UV 的縮放 ($xy$ 一組、$zw$ 一組) | `Ripple0`、`Ripple1` 的 Scale (各接一個 `SSG_Ripple_Layer` 的 Ripple) |
+| `RippleSpeed` | Vector 4 (−0.4, 0.02, −0.1, −0.4) | 兩組 UV 每秒移動多少 | `Ripple0`、`Ripple1` 的速度 (各接一個 `SSG_Ripple_Layer` 的 Ripple) |
+| `RefractionStrength` | 0.015 | 折射偏移多少 | `RefractionStrength` (接 `SSG_Refraction_UV` 的 Strength) |
+| `Color` | (0.75, 0.76, 0.67) | 乘在背景上的染色 | 染色 $C_{\text{tint}}$ 裡的 `ShallowColor` |
+| `DepthColor` | (0.16, 0.16, 0.13) | 深處的顏色 | `DeepColor` |
+| `OpaqueDepth` | 4 | 多厚之後完全變成深處的顏色 (公尺) | `Clarity` (接 `SSG_Absorption` 的 Clarity) |
+
+Graph Settings 和你的水比較：
+
+| 項目 | WaterLake | 你的水 |
+| --- | --- | --- |
+| Material、Surface Type、Blending Mode | Lit、Transparent、Alpha | 相同 |
+| Render Face、Depth Write、Depth Test | Front、Auto、LEqual | 相同 |
+| Cast Shadows、Receive Shadows | 關、開 | 相同 |
+| Fragment Normal Space | **World** | Tangent |
+| Preserve Specular Lighting | **關** | 勾選 |
+| Alpha block | 接 `DepthFade` (0.25) | 1 |
+
+不同的三項，原因在下面各塊說明。
+
+### 細波紋 ↔ Flow Normals
+
+官方的 `Ripple UV Coordinates`、`Small Ripples`、`Large Ripples` 三個 group，加上 `DistanceMask`，做的是 [Flow Normals](flow-normals.html) 的細波紋：
+
+1. `Ripple UV Coordinates`：一次算出兩組 UV
+
+   Position (Absolute World) → Split → Combine 成 $(x, z, x, z)$，乘 `RippleScale`，加上 Time × `RippleSpeed`。一個 Vector 4 裝兩組 UV：$xy$ 一組、$zw$ 一組，各自有自己的縮放和速度。
+
+2. `Small Ripples`：sample 兩次
+
+   $xy$、$zw$ 各 sample 一次 normal map (法線貼圖：把 normal 存成顏色的 texture) `puddle_norm`，各接 `ExpandVec2` 展開成 −1 到 1，兩個結果相加。
+
+3. `Large Ripples`：再 sample 兩次
+
+   同一組 UV 先乘 (0.17, 0.19, −0.13, 0.23) 再 sample。乘上小於 1 的數，同一段距離內的花紋變少，花紋放大成 4 到 8 倍，所以是「大」波紋。
+
+4. 小 + 大，乘上 `DistanceMask` (Distance 80、Offset 8)
+
+   Sticky Note 寫著：遠處關掉 normal，讓湖在遠處像鏡子一樣平滑。
+
+| | WaterLake | 你的水 |
+| --- | --- | --- |
+| UV | world $x$、$z$ | 相同 |
+| 花紋從哪來 | normal map `puddle_norm`，sample 4 次 | normal map `WaterNormal`，sample 2 次 (兩個 `SSG_Ripple_Layer` 各一次) |
+| 時間 | Time node | `WaterTime` |
+| 兩層怎麼合 | 展開後直接相加 | Normal Blend |
+| 遠處淡出 | 8 公尺內不淡，之後直線下降，88 公尺完全消失 | $1 - \operatorname{smoothstep}(0, 60, d)$：30 公尺剩一半，60 公尺消失 |
+
+為什麼不同：
+
+- **花紋**：兩邊都是捲動的 normal map。官方多了兩次放大的 sample (`Large Ripples`)，你的兩層本身就一粗一細。官方的貼圖以 Default 類型匯入，自己用 `ExpandVec2` 展開；你的以 Normal map 類型匯入，由 Sample Texture 2D 解開。
+- **時間**：你的水所有會動的東西都用 `WaterBody` 傳進來的同一個時間。
+- **淡出距離**：數字不能直接搬。你的湖 60 公尺見方，站在湖心看岸邊是 30 公尺，官方的設定在那裡還剩 0.73，幾乎沒有淡出。
+- **兩層怎麼合**：和下一塊一起說明。
+
+### normal 轉成 world space ↔ Flow Normals 的 tangent space
+
+`Convert Normals To World Space` 這一塊把波紋變成最後的 normal：
+
+- Normal Vector (World) → Split。
+- Combine：R = 波紋的 $x$ + normal 的 $x$，**G = 常數 5**，B = 波紋的 $y$ + normal 的 $z$。
+- Normalize → Normal (World Space)。
+
+Sticky Note 寫著：已知 mesh 是朝上的平面時，這是比較快的轉換方法。
+
+為什麼行得通：平面朝上時，tangent space 的 $x$、$y$ 剛好對著 world $x$、$z$，normal 就是 world $y$。所以把波紋的兩個分量直接放進 world $x$、$z$，$y$ 填一個常數，Normalize 之後就是 world space 的 normal，不必經過 tangent space 的換算。
+
+常數 5 決定波紋有多斜。normal $(r_x,\ 5,\ r_z)$ 和正上方的夾角是 $\arctan(|\mathbf{r}| / 5)$，$|\mathbf{r}|$ 是波紋兩個分量的長度：
+
+| 波紋的長度 $\lvert\mathbf{r}\rvert$ | 0.5 | 1 | 2 |
+| --- | --- | --- | --- |
+| 填 5 (WaterLake) | 5.7° | 11.3° | 21.8° |
+| 填 3 (WaterStream) | 9.5° | 18.4° | 33.7° |
+
+填得越大，波紋越平。它是 RippleStrength 的反向旋鈕。
+
+你的水為什麼不能這樣做：你的水面有 Gerstner 波，表面是斜的，normal 不是朝上，「tangent space 的 $x$、$y$ 對著 world $x$、$z$」不成立。所以 Flow Normals 用 tangent space：Vertex 區給出波浪的 Normal 與 Tangent，細波紋貼在斜面上。WaterLake 沒有 vertex wave，才能走這個捷徑。這就是兩邊 Fragment Normal Space 不同的原因。
+
+兩層怎麼合也是同一個原因。官方的每一層只是「往 $x$、$z$ 歪多少」的量，相加之後再填 $y$ 就好；你的兩層各自是完整的 tangent space normal，所以用 Normal Blend 合成。
+
+### 折射 ↔ Refraction
+
+`Water Refraction`：Screen Position (Default) 加上「波紋的 $x$、$y$ × `RefractionStrength`」，用這個 UV 取 Scene Color。這就是 [Refraction 第三步](refraction.html#第三步：依細波紋-offset-sampling-的位置)的做法；你的水在 [Refraction 第六步](refraction.html#第六步：讓大浪也偏折)又改成含大浪的 world normal，並除以 depth。兩邊都沒有用 Refract node。
+
+| | WaterLake | 你的水 |
+| --- | --- | --- |
+| 偏移 | 波紋的 $x$、$y$ × 0.015 | `SSG_Refraction_UV`：world normal $\mathbf{n}_{\text{ws}}$ 的 $x$、$z$ × 0.25 × saturate($h$) ÷ 水面後方的 depth $d_s$ |
+| 偏移後檢查 depth | 沒有 | `SSG_Refraction_Select` 裡的 Comparison + Branch：取到水面前方的東西就退回原位置 |
+| 背景接到 | Base Color (先乘 `Color`) | Emission |
+| Alpha | 保留混合：`DepthFade` (0.25) | 1 |
+| render pipeline | URP、HDRP 各一支 | 只有 URP |
+
+為什麼不同：
+
+- **0.015 和 0.25**：乘的東西和單位都不一樣。官方乘的是 sample 四次展開後相加的值 (每次 −1 到 1)，乘完直接是畫面上的偏移；你乘的是 normal 的水平分量 (約 0.2)，還要再除以幾公尺的 $d_s$，除完才是畫面上的係數 (5 公尺處是 0.25 ÷ 5 = 0.05)。同樣叫 RefractionStrength，數字不能互搬。
+- **偏移後檢查 depth**：官方沒有處理，也沒有說明。偏移量小時，「水面前方的石頭被拉進水裡」這個錯誤不容易看出來；你的水在 [Refraction 第四步](refraction.html#第四步：不要取到水面前方的東西)處理了它。
+- **背景放 Base Color、保留 Alpha**：[Refraction 第二步](refraction.html#第二步：換掉混色的方式)說過這兩件事各自的問題。背景接 Base Color，Lit 會拿它再乘一次光照，等於照了兩次光；Alpha 小於 1 的地方，GPU 會把原本的畫面再混進來一份。WaterLake 兩件事都留著。它的 Alpha 是 saturate($h$ / 0.25)，只在水邊 25 公分厚的那一圈小於 1，所以多混的那一份只出現在那一圈，作用是讓水邊柔和地淡出。官方沒有寫選這種接法的理由。
+
+### 深淺 ↔ Depth Coloring
+
+圖上的 `Depth Fog` (官方的 Sticky Note 標題)：
+
+$$T_{\text{lake}} = \operatorname{saturate}(h / D)^{0.1}, \qquad C_{\text{base}} = \operatorname{lerp}(C_{\text{color}}\,C_{\text{scene}},\ C_{\text{depth}},\ T_{\text{lake}})$$
+
+| 符號 | 意思 |
+| --- | --- |
+| $h$ | `DepthFade` 裡算的厚度：Scene Depth (Eye) 減 Screen Position (Raw) 的 A |
+| $D$ | `OpaqueDepth`，4 公尺 |
+| $C_{\text{color}}$、$C_{\text{depth}}$ | Property `Color`、`DepthColor` |
+| $C_{\text{scene}}$ | 折射後取到的背景 |
+
+相同的地方：$h$ 和你在 [Depth Coloring](depth-coloring.html) 算的 $h$ 是同一個量，連 node 都一樣，都是沿攝影機前方量的厚度，不是垂直水深。$T_{\text{lake}}$ 是深處顏色佔的比例，對應你的 $\alpha$。
+
+不同的地方是曲線。你的 $\alpha = 1 - e^{-kh}$，$k = 4.605 / \text{Clarity}$：
+
+<ex-fig of="water-lake-vs-clarity-depth-curve" caption="深處顏色佔的比例隨厚度怎麼變。WaterLake 用預設的 OpaqueDepth 4，你的水用預設的 Clarity 5" />
+
+| $h$ (公尺) | 0.1 | 0.5 | 1 | 2 |
+| --- | --- | --- | --- | --- |
+| WaterLake 的 $T_{\text{lake}}$ | 0.69 | 0.81 | 0.87 | 0.93 |
+| 你的 $\alpha$ | 0.09 | 0.37 | 0.60 | 0.84 |
+
+0.1 次方讓曲線一離開水邊就衝到七成。依這條式子，WaterLake 除了水邊一圈，大半是 `DepthColor`，一種偏灰的暗色。你的湖要的是「淺水見底、越深越暗」的連續漸層，所以用 Beer-Lambert：每多一段水，剩下的光就乘上同一個比例。
+
+WaterLake 的水邊靠 Alpha 淡出 (`DepthFade` 0.25)；你的水 Alpha 是 1，水邊靠 $\tau = 1$ 讓背景整份透出來。WaterLake 沒有泡沫。
+
+### 反射與 specular highlight ↔ Reflection
+
+WaterLake 沒有任何反射的 node。Smoothness block 沒接線，欄位是 1.0；Metallic 是 0。反射和太陽 specular highlight 全部由 URP Lit 自己算，來源是天空盒與 Reflection Probe。這一點和 [Reflection](reflection.html) 相同：你的 graph 也沒有 sample Reflection Probe，也沒有在反射上再乘一次 Fresnel。
+
+| | WaterLake | 你的水 |
+| --- | --- | --- |
+| Smoothness | 常數 1.0 | Property `Smoothness`，0.9 |
+| 透過水面看到的部分隨角度變弱 | 沒有 | 乘上 `SSG_Fresnel` 的 OneMinusFresnel ($1 - F$) |
+| Preserve Specular Lighting | 關 | 勾選 |
+
+為什麼不同：
+
+- **Smoothness**：你的水用 0.9，讓太陽 specular 還看得出大小；越接近 1，亮點越小越銳利。遠處的鏡面，WaterLake 靠 `DistanceMask` 關掉 normal 做到；你的水靠遠處淡出加上 $1 - F$。
+- **Preserve Specular Lighting**：關掉時，整個輸出 (含反射與 specular) 都乘上 Alpha，所以 WaterLake 水邊那一圈的反射會跟著變淡。你的水 Alpha 是 1，這個設定不影響結果。
+
+## WaterSimple_FoamMask：vertex wave 與泡沫
+
+### 和 WaterLake 差不多的部分
+
+- 細波紋 (`Scrolling Normals`)：只 sample 2 次 (沒有大波紋)，沒有 `DistanceMask`。
+- 折射 (`Refraction`)：和 WaterLake 相同，偏移另外加上 Normal Vector (World) 的 $x$、$z$。
+- 深淺 (`Depth Fog`)：次方用 0.5，再加上 Fresnel，見本節最後一塊。
+
+不同的是 vertex wave 和泡沫。
+
+### vertex wave ↔ Gerstner Waves
+
+Vertex 區沒有 group，從 block 往回追：
+
+- Position (Object) 加上 3 個 `GerstnerWave` Sub Graph 的 Offset → Position block。
+- 3 個 `GerstnerWave` 的 Normal 相加 → Normal block。
+- Tangent block 沒接線。
+
+每個 `GerstnerWave` node 是一個波，參數直接填在 node 的輸入欄：
+
+| 波 | WaveDirection | WaveLength | WaveHeight | PeakSharpness |
+| --- | --- | --- | --- | --- |
+| 1 | (−0.2, 0, −0.7) | 2.5 | 0.075 | 0.3 |
+| 2 | (−1, 0, 0) | 3.0 | 0.05 | 0.3 |
+| 3 | (−0.5, 0, 0.5) | 1.8 | 0.04 | 0.4 |
+
+打開 `GerstnerWave` Sub Graph，把裡面的 node 連線整理成式子：
+
+$$\varphi = k\,(\mathbf{D} \cdot \mathbf{P}_s) - \omega t, \qquad k = \frac{2\pi}{L}, \qquad \omega = \sqrt{9.8\,k}$$
+
+$$\Delta\mathbf{P} = (0,\ H\cos\varphi,\ 0) - \mathbf{D}\,\frac{Q}{k}\,\sin\varphi$$
+
+| 符號 | 意思 |
+| --- | --- |
+| $\mathbf{D}$ | WaveDirection normalize 後的方向 |
+| $\mathbf{P}_s$ | object space 的位置乘上 GameObject 的 Scale (Object node 的 Scale 輸出) |
+| $L$、$H$、$Q$ | WaveLength、WaveHeight、PeakSharpness |
+| $\Delta\mathbf{P}$ | vertex 的位移 (Offset 輸出) |
+
+拿 [Gerstner Waves](gerstner-waves.html) 的式子來比，你的水每個波的位移是：
+
+$$\Delta\mathbf{P} = (d_x A\cos\varphi,\ A\sin\varphi,\ d_z A\cos\varphi), \qquad A = \frac{S}{k}$$
+
+$(d_x, d_z)$ 是波前進的方向，$S$ 是陡度，$\varphi = k\,(d_x x + d_z z) - \omega t$。官方式子的 $\mathbf{D}$ 就是這裡的 $\mathbf{d}$，只是寫成大寫。
+
+看起來不一樣，其實是同一種波，差在兩處：
+
+1. sin 和 cos 對調，多了一個負號
+
+   這只是相位差 90 度。把你的式子裡的 $\varphi$ 換成 $\varphi + \pi/2$，$\sin(\varphi + \pi/2) = \cos\varphi$、$\cos(\varphi + \pi/2) = -\sin\varphi$，就變成官方的形狀。波形一樣，只是起點錯開四分之一個週期。
+
+2. 高度和水平移動分成兩個參數
+
+   你的水用一個陡度 $S$，高度和水平移動都是 $A = S/k$，每個 vertex 畫的是圓。官方的高度是 $H$，水平是 $Q/k$，可以不一樣：波 1 的 $k \approx 2.51$，水平移動 $0.3 / 2.51 \approx 0.12$ 公尺，高度只有 0.075 公尺，vertex 畫的是橫躺的橢圓。
+
+| | FoamMask | 你的水 |
+| --- | --- | --- |
+| 幾個波 | 3 個，一個 Sub Graph node 一個波 | 4 個，一個 Custom Function 裡用 for 迴圈 |
+| 參數 | 填在 node 輸入欄的常數 | 每個波一個 Per Material 的 Vector 4，值來自設定資產 |
+| 座標 | object space 的位置乘上 GameObject 的 Scale | world space |
+| 時間 | Time node | `WaterTime` (由 C# 傳) |
+| 高度與水平 | 兩個參數 | 一個陡度 |
+| 重力 | 9.8 | 9.81 |
+| Normal block | 3 個波的 Normal 相加 | 兩條 tangent cross 之後 Normalize |
+| Tangent block | 沒接 | 接 |
+
+為什麼不同：
+
+- **參數與時間**：你的波浪參數要讓 shader 和 C# 共用，所以只放在設定資產一個地方，時間也由 C# 傳，兩邊才不會對不上。官方範例沒有任何 C# 腳本，參數寫死在 graph 裡就夠了；要讓每個 Material 各自調，得自己把它們改成 Blackboard Property。
+- **for 迴圈與 Sub Graph**：兩邊解決的是同一個問題：一個波就要二十多個 node，不想每個波重接一次。官方把一個波包成 Sub Graph，要幾個波就放幾個 node；你的水把 4 個 Vector 4 排成陣列，在 Custom Function 裡用迴圈算。
+- **座標**：Gerstner Waves 選 world space 有兩個理由：Scale 不改變波長、相鄰的兩片水相位一致。官方乘上 Scale 解決了第一個；位置仍然從 GameObject 的原點算，GameObject 移動時，波的花紋跟著 GameObject 走。
+- **Tangent**：你的細波紋在 tangent space，需要 Tangent。官方四個水體 graph 的 Fragment Normal Space 都是 World，不經過 tangent space，所以不需要。
+
+### 泡沫 ↔ Depth Coloring 的泡沫
+
+`Animated Foam` 與 `Edge Mask` 兩個 group 做泡沫。從連線整理，大致是：
+
+1. 哪裡有泡沫：`DepthFade` (0.25) 標出水和物體交界的薄薄一圈，加上手繪 texture `FoamMask` 的 R，Saturate。
+2. 泡沫的花紋：`MotionChaos` Sub Graph 把同一張泡沫 texture sample 4 次，各往不同的斜方向捲動，再相加，花紋不會整片往同一個方向流。
+3. 兩者相乘。
+4. Smoothness ← One Minus (泡沫)：有泡沫的地方不光滑。
+
+和你在 [Depth Coloring](depth-coloring.html) 做的是同一個想法：用厚度標出接觸處，再用花紋把整齊的邊打散。
+
+| | FoamMask | 你的水 |
+| --- | --- | --- |
+| 接觸處 | `DepthFade` (0.25) | `SSG_Foam` 裡的 $1 - \operatorname{saturate}(h / \text{FoamWidth})$ |
+| 花紋 | texture sample 4 次、四個方向捲動 | noise texture sample 1 次，往一個方向漂 |
+| 指定位置 | 手繪 texture `FoamMask` | 沒有 |
+| 泡沫處的 Smoothness | 降低 | 不變 |
+
+### Fresnel 的另一種用法 ↔ Reflection
+
+FoamMask 的 `Depth Fog`：
+
+- `DepthFade` (`OpaqueDepth`) 的 0.5 次方，加上 Fresnel Effect (Power 5)，Saturate，當作 Lerp 的 T。
+- T 越大越偏 `DepthColor`，所以低角度時水色更偏深處的顏色。
+
+同一個 Fresnel Effect node，你的水在 Reflection 拿它做另一件事：$1 - F$ 乘在透過水面看到的部分上，讓出位置給 Lit 的反射。讀到 Fresnel Effect 時，要往下游追它接到哪裡，才知道它在這個 graph 裡的意思。
+
+## 名字一樣，意思不同
+
+### 最容易讀錯的地方
+
+讀別人的 graph，最容易出錯的是看到熟悉的名字，就以為是同一件事。這兩個範例裡就有這幾個：
+
+| 名字 | 在官方範例 | 在你的水或 Unity 內建 |
+| --- | --- | --- |
+| RefractionStrength | 乘在 sample 四次相加的值上，0.015 | 乘在 world normal 的 $x$、$z$ (約 0.2) 上、再除以 $d_s$，0.25 |
+| Fresnel Effect | 加進深處顏色的比例 (Power 5) | $1 - F$ 乘在透過水面看到的部分 (Power 4) |
+| normal 的 block | Normal (World Space) | Normal (Tangent Space) |
+| normal map | 匯入成一般 texture (Texture Type 是 Default)，自己用 `ExpandVec2` 做 $2x - 1$ | 你的水不用 normal map |
+| Position 的 Space | Absolute World | World (URP 下兩者相同，都是以公尺為單位的 world position) |
+| 光的方向 | 範例共用的 `Common/Subgraphs` 裡的 `MainLight` Sub Graph：Direction 從表面指向光源 | Shader Graph 內建的 Main Light Direction node：光前進的方向。兩者正負相反 |
+
+normal map 那一列：normal 的分量在 −1 到 1，texture 的顏色只能存 0 到 1，所以存的時候先變成 $(n + 1)/2$，讀出來要做 $2x - 1$ 還原。官方的 texture 沒有標成 Normal map，所以自己還原。
+
+光的方向那一列：兩個水體 graph 都沒用到，但讀其他範例時會遇到。拿來算反射或明暗前，先確認是哪一種。
+
+### 遇到時怎麼確認
+
+- 打開 Sub Graph 看輸出是怎麼算的。
+- 查 node 的說明：選取 node 按 F1 開官方文件。
+- 把那個值暫時接到自己 graph 的 Base Color 看顏色。官方的 graph 不要存。
+
+## 可以借的想法
+
+### 不在這一章做，之後想加時自己接
+
+官方範例採 Unity Companion License。這裡只借觀念，用你自己 graph 裡的 node 重接，不複製官方的 node 或檔案。
+
+1. 泡沫處降低 Smoothness
+
+   FoamMask 讓泡沫的地方不光滑。你的 graph 已經有 One Minus「$1 - f$」，把 `Smoothness` Property 乘上它，再接 Smoothness block，泡沫上就不會出現太陽的亮點和天空的倒影。
+
+2. 手繪泡沫的位置
+
+   FoamMask 用一張手繪 texture 指定「這裡一定有泡沫」，例如瀑布打在水面的地方。你的湖要在某塊石頭周圍加寬泡沫時，可以用同樣的想法：一張對應水面的 texture，加進泡沫的遮罩。
+
+## 回頭看
+
+### 接回開頭的問題
+
+開頭的問題是：別人的 graph 打開來是一大片線，不知道哪一塊在做什麼。照四個習慣拆開之後：
+
+| 官方的那一塊 | 對應 | 最主要的不同 | 為什麼 |
+| --- | --- | --- | --- |
+| `Ripple UV`、`Small / Large Ripples`、`DistanceMask` | Flow Normals | 直線淡出 vs smoothstep | 湖的大小不同 |
+| `Convert Normals To World Space` | Flow Normals | 平面捷徑 vs tangent space | 你的水面有波浪，不是朝上的平面 |
+| `Water Refraction` | Refraction | 不檢查 depth；背景接 Base Color、保留 Alpha | 你的水避開了照兩次光與多混一份背景 |
+| `Depth Fog` | Depth Coloring | 0.1 次方 vs Beer-Lambert | 你要淺水見底的連續漸層 |
+| Smoothness 1.0、沒有反射 node | Reflection | 沒有 $1 - F$ | 你的水讓透過去的部分讓位給反射 |
+| `GerstnerWave` ×3 | Gerstner Waves | 常數、object space vs 設定資產、world space | 參數要和 C# 共用；相鄰的水相位一致 |
+| `Animated Foam` | Depth Coloring 的泡沫 | sample 4 次加手繪遮罩 vs sample 1 次、沒有遮罩 | 先求最精簡的接法 |
+
+### 檢查點：拆得開官方的湖
+
+讀對時，你能在 WaterLake 裡找到：
+
+- Vertex 區三個沒接線的 block。
+- 接到 Normal (World Space) 的 Combine，它的 G 填著 5。
+- `Water Refraction` 裡的 Scene Color，和旁邊給 HDRP 用的 HD Scene Color。
+- 接到 Base Color 的 Lerp，它的 T 來自 `DepthFade` 加 Power (0.1)。
+- 接到 Alpha 的 `DepthFade`，Distance 是 0.25。
+- 沒接線、欄位填 1.0 的 Smoothness block。
+
+在 WaterSimple_FoamMask 裡找到：三個 `GerstnerWave` node，它們的 Offset 加到 Position block，Tangent block 沒接線。
+
+這一章不對應 Final Demo 的任何一條，也沒有改任何檔案：你的專案裡的檔案和 Reflection 結束時相同。打開過的官方 graph 如果動到了，不要存。
+
+### 下一步
+
+- 下一章 [Wave Height Query](wave-height-query.html) 讓 C# 問出任一點的水面高度。
+
+### 請回報
+
+以下是需要你在 Unity 裡看一眼的事：
+
+| # | 去哪裡看 | 回報什麼 |
+| --- | --- | --- |
+| 1 | Project 視窗的 `Assets/Samples/Shader Graph/<版本>/` | 底下的資料夾名稱；四個水體 graph 是不是在同一個 `Water` 資料夾 |
+| 2 | WaterLake 的 Graph Inspector > Graph Settings | 和「全貌」的 Graph Settings 表是否一致，特別是 Fragment Normal Space、Preserve Specular Lighting |
+| 3 | WaterLake 的 group 與 Sticky Note | 看不看得到 `Ripple UV Coordinates`、`Small Ripples`、`Large Ripples`、`Convert Normals To World Space`、`Water Refraction` 與 `Depth Fog`；名稱有沒有不同 |
+| 4 | 在 WaterLake 裡雙擊一個 Sub Graph node (例如 `DistanceMask`) | 會不會直接打開那個 Sub Graph |
+| 5 | Project 視窗搜尋 `Depth Fade` | 找不找得到；找到的話在哪個路徑 |
+| 6 | 選做的範例 Scene `URPProductionReadyShaders` | 用了哪幾種水；Console 有沒有紅字 |
+
+## 來源
+
+### 官方文件與原始檔
+
+縮寫：`SG` = `https://docs.unity3d.com/Packages/com.unity.shadergraph@17.3/manual`，`GFX` = GitHub `Unity-Technologies/Graphics` 的 `6000.3/staging` 分支 `Packages/`。
+
+- 範例的說明與匯入：`SG/Shader-Graph-Sample-Production-Ready-Water.html`、`SG/ShaderGraph-Samples-Import.html`；sample 的定義：`GFX/com.unity.shadergraph/package.json`
+- 四個水體 graph 與 Material：`GFX/com.unity.shadergraph/Samples~/ProductionReady/Environment/Water/`
+- Sub Graph：`GFX/com.unity.shadergraph/Samples~/Common/Subgraphs/` (`ExpandVec2`、`DistanceMask`、`AlphaMerge`、`BranchOnRP`、`GerstnerWave`、`MotionChaos`、`MainLight`)；`Depth Fade`：`GFX/com.unity.shadergraph/GraphTemplates/Subgraphs/`
+- Graph Settings 各欄位的意思：`GFX/com.unity.render-pipelines.universal/Editor/ShaderGraph/Targets/UniversalTarget.cs`、`UniversalLitSubTarget.cs`
+- Preserve Specular Lighting 關閉時整個輸出乘上 Alpha：URP 的原始碼 (`GFX/com.unity.render-pipelines.universal/`)
+- Main Light Direction node：`SG/Main-Light-Direction-Node.html`；輸出 `-GetMainLight().direction` 來自原始碼 `GFX/com.unity.shadergraph/Editor/Data/Nodes/Input/Lighting/MainLightDirectionNode.cs`
+- 授權：Unity Companion License (`https://unity.com/legal/licenses/unity-companion-license`)
+- `GerstnerWave` 的式子、泡沫的組成、各表的換算數字 (角度、曲線的值、波 1 的水平移動) 是從 node 連線與 Property 值整理、計算出來的，官方文件沒有寫
+</script>
+<script>
+explainer({
+  title: 'Official Water Sample',
+  assumes: ['Unity 編輯器的基本操作 (看完 Unity Learn 的 Basic 與 Creative Core)', { t: 'Shader Graph (Sub Graph、Graph Settings)', href: 'shader-graph.html' }, { t: 'Gerstner Waves', href: 'gerstner-waves.html' }, { t: 'Depth Coloring', href: 'depth-coloring.html' }, { t: 'Flow Normals', href: 'flow-normals.html' }, { t: 'Refraction', href: 'refraction.html' }, { t: 'Reflection (做完的湖)', href: 'reflection.html' }, { t: 'URP Waterbody (總覽)', href: 'urp-water.html' }],
+  approach: '對照已知：拿自己做完的水當對照，逐塊讀官方的 WaterLake 與 WaterSimple_FoamMask',
+  env: 'Windows 11、Unity 6000.3.20f1 (英文介面)、URP 17.3、Shader Graph 17.3',
+  terms: {
+    'group': 'Shader Graph 裡框住一群 node、上面有標題的方框；選取 node 按 Ctrl + G 建立',
+    'Sticky Note': '貼在 graph 上的一段文字，有標題與內文，不影響 shader',
+    'Sub Graph': '把一串 node 存成一個資產，在其他 graph 裡當作一個 node 用；Blackboard Property 是輸入，Output node 收輸出',
+  },
+});
+</script>
+</body>
+</html>

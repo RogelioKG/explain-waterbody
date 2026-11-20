@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>URP Waterbody</title>
+<script src="../_explainer/explainer.js"></script>
+</head>
+<body>
+<script type="text/markdown" id="ex-content">
+## 這份文檔做什麼
+
+### 為什麼要自己做水
+
+Unity 的兩條 render pipeline (渲染管線：把場景畫成畫面的流程) 裡，HDRP (High Definition Render Pipeline，追求高畫質) 有內建的水體系統，URP (Universal Render Pipeline，效能取向、跨平台) 沒有：截至 Unity 6.3，官方功能對照表的 Water system 只有 HDRP 是 Yes。專案必須用 URP，所以水要自己做。
+
+官方在 Shader Graph 的 Production Ready Shaders 範例裡有幾個水體 shader，這份文檔只把它當字典查。
+
+### 做完會得到什麼
+
+一片 low poly 風格遊戲用的湖：水面會起伏、看得出深淺、岸邊有泡沫、會折射與反射、湖底有焦散，浮標會跟著波浪漂、入水會起漣漪；潛進水裡有水下的色調與霧，半入水時畫面上下分界跟著波浪走。
+
+風格要的是有特色，不追求逼近現實，水面參考 Valheim 的水面。所有外觀參數都開成 Material (材質：存 shader 和參數的資產) 的 Property (屬性：可調的變數)，最後長什麼樣子由你的專案自己調。水體的腳本與資產全部放在一個資料夾 (`Assets/Water/`)，學完後整個複製進正式專案就能用。
+
+不做的：連線同步、HDRP 的水、河流與瀑布、寫實的海洋。
+
+## 要的效果在哪一章
+
+### Final Demo 對照表
+
+Final Demo 是這份文檔的驗收清單。每一條都可以用眼睛判斷做到了沒，右邊是做出它的那一章。
+
+| 視角 | 效果 | 在哪一章 |
+| --- | --- | --- |
+| 水面上 | 水面 mesh (網格：由 vertex 和三角形組成的模型形狀) 本身會上下起伏，不是只靠 texture (貼圖：存著顏色或資料的圖片) 捲動假裝在動 | [Gerstner Waves](gerstner-waves.html) |
+| 水面上 | 近岸淺水偏透明、能看到水底，越深越暗、越偏藍綠色 | [Depth Coloring](depth-coloring.html) |
+| 水面上 | 岸邊與物體接觸處有白色泡沫 | [Depth Coloring](depth-coloring.html) |
+| 水面上 | 透過水面看水下物體會有折射扭曲 | [Refraction](refraction.html) |
+| 水面上 | 低角度看水面時反射天空，俯視時較透明 | [Reflection](reflection.html) |
+| 水面下 | 潛進水裡後，畫面換成水下色調，加上距離霧 | [Underwater Fog and Visibility](underwater-fog.html) |
+| 水面下 | 遠處的魚和物體逐漸看不清，近處清楚 | [Underwater Fog and Visibility](underwater-fog.html) |
+| 水面下 | 從水下往上看，水面跟著波浪晃動 | ⬜ Surface from Below |
+| 水線過渡 | 攝影機半入水時，畫面上半是水上、下半是水下，分界線跟著波浪起伏 | ⬜ Waterline |
+| 水線過渡 | 進出水面時不會閃爍，也不會一下子硬切 | ⬜ Waterline |
+| 互動與物理 | 浮標會跟著波浪上下起伏、左右傾斜 | [Buoyancy](buoyancy.html)、[Fishing Bobber](fishing-bobber.html) |
+| 互動與物理 | 浮標入水時產生漣漪，魚咬鉤時浮標下沉 | [Interactive Ripples](interactive-ripples.html) (機制；浮標見[「掛到浮標上」](interactive-ripples.html#掛到浮標上))、[Fishing Bobber](fishing-bobber.html) |
+| 互動與物理 | 角色或物體穿過水面時產生水花或漣漪 | [Interactive Ripples](interactive-ripples.html) |
+
+## 學習路線
+
+### 照箭頭一章接一章做
+
+全程只用一個練習專案、一片湖，每一章往湖上加一個效果，所以照箭頭的順序做。虛線框的那一章是選讀，可以跳過。
+
+<ex-fig of="urp-water-learning-route" caption="學習路線：照箭頭做；虛線框的「讀懂官方範例」是選讀；第二階段 (水下) 可以等第一階段做完再決定要不要做" />
+
+做完第一階段，就有一片能釣魚的湖。第二階段是水下，等角色確定要潛水再做也可以。
+
+### 每一章做完得到什麼
+
+✅ 是已經寫好的章，⬜ 是還沒寫的。
+
+| 章 | 做完得到什麼 |
+| --- | --- |
+| ✅ 第 1 章 [Vector Math](vector-math.html) | 做水會用到的數學：座標轉換、depth (深度：到攝影機的遠近)、normal (法線：垂直於表面、朝外的方向)、反射與折射的向量 |
+| ✅ 第 2 章 [Shader Basics](shader-basics.html) | 知道 shader 怎麼決定每個 vertex (頂點：mesh 上的角點，存著位置、法線、UV 等資料) 的位置、每個像素的顏色 |
+| ✅ 第 3 章 [URP Setup](urp-setup.html) | 練習專案、有深有淺的示範湖、水面 mesh、放進湖裡能走的角色 |
+| ✅ 第 4 章 [Shader Graph](shader-graph.html) | 一片套著自製 shader 的水面，看得懂短短的 HLSL |
+| ✅ 第 5 章 [Gerstner Waves](gerstner-waves.html) | 水面 mesh 真的上下起伏 |
+| ✅ 第 6 章 [Depth Coloring](depth-coloring.html) | 淺水透明、深水變暗，岸邊有泡沫 |
+| ✅ 第 7 章 [Flow Normals](flow-normals.html) | 水面上細小波紋的光影 |
+| ✅ 第 8 章 [Refraction](refraction.html) | 透過水面看水下的東西會扭曲 |
+| ✅ 第 9 章 [Reflection](reflection.html) | 低角度反射天空，俯視時透明 |
+| ✅ 第 10 章 [Caustics](caustics.html) | 淺水的湖底有晃動的焦散亮紋，越深越淡 |
+| ✅ 第 11 章 [Official Water Sample](official-sample.html) | 讀懂別人寫的水體 shader，知道和我們的做法差在哪 |
+| ✅ 第 12 章 [Wave Height Query](wave-height-query.html) | C# 能查任一點的水面高度 |
+| ✅ 第 13 章 [Buoyancy](buoyancy.html) | 物體跟著波浪起伏、傾斜 |
+| ✅ 第 14 章 [Fishing Bobber](fishing-bobber.html) | 浮標漂浮，咬鉤時下沉，有釣線 |
+| ✅ 第 15 章 [Interactive Ripples](interactive-ripples.html) | 物體、角色穿過水面時有漣漪與水花 |
+| ✅ 第 16 章 [Underwater Fog and Visibility](underwater-fog.html) | 潛進水裡有水下色調與距離霧，遠處的魚看不清 |
+| ⬜ 第 17 章 Surface from Below | 從水下往上看，水面跟著波浪晃動 |
+| ⬜ 第 18 章 Waterline | 半入水時上下分界跟著波浪，進出水面不閃爍 |
+
+## 從哪裡開始
+
+### 開始之前
+
+準備好 Windows 11 與 Unity 6000.3.20f1 (Unity 6.3，英文介面)。文檔裡的介面文字都照英文介面寫。
+
+### 第一步
+
+第 1、2、3 章之間沒有先後，從哪一章開始都可以：
+
+- 想先打開 Unity 動手：從 [URP Setup](urp-setup.html) 開始，建好練習專案和示範湖
+- 想先把觀念弄清楚：從第 1 章 Vector Math 開始
+
+三章都做完，就照路線從第 4 章往下走。
+
+## 回頭看
+
+### 接回開頭的問題
+
+URP 沒有現成的水，所以這份文檔帶你自己做一片：照路線一章加一個效果，做完第一階段得到一片能釣魚的湖，第二階段再加上水下。想找某個效果在哪一章，查「Final Demo 對照表」。
+
+## 來源
+
+### 官方文件
+
+- Unity 6000.3 Render Pipeline feature comparison (Water system 只有 HDRP 為 Yes)：https://docs.unity.com/en-us/engine/6000.3/manual/render-pipelines/choose-a-render-pipeline/feature-comparison
+- Shader Graph 17.3 Production Ready Shaders 的水體範例：https://docs.unity3d.com/Packages/com.unity.shadergraph@17.3/manual/Shader-Graph-Sample-Production-Ready-Water.html
+</script>
+<script>
+explainer({
+  title: 'URP Waterbody',
+  assumes: ['Unity 編輯器的基本操作 (看完 Unity Learn 的 Basic 與 Creative Core)', '高中數學', 'C# 基礎'],
+  approach: '拆解 (樹的根)：水由幾個獨立的效果組成，一章做一個',
+});
+</script>
+</body>
+</html>

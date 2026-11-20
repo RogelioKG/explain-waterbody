@@ -1,0 +1,906 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Refraction</title>
+<script src="../_explainer/explainer.js"></script>
+</head>
+<body>
+<script type="text/markdown" id="ex-content">
+## 這一章要解決的問題
+
+### 水面在動，水下的東西卻是筆直的
+
+做完 [Flow Normals](flow-normals.html)，水面上的細波紋一直在漂、反光碎成小亮點。但透過水面往下看，石頭在水下的部分、沉底的石頭、魚，輪廓都穩穩的，像隔著一片平的玻璃。真的水面上，波紋會讓水下的東西跟著晃動、扭曲。
+
+這一章讓水下的畫面跟著細波紋與大浪扭曲：露出水面的石頭、泡沫、深淺的顏色都不變，只有透過水看到的東西在晃。新參數只有一個，放在設定資產 `SO_LakeWater` 裡；graph 裡算折射的 node 最後收成兩個 Sub Graph，之後的章節直接接它們的接口。
+
+<ex-fig of="refraction-before-after-shore-view" caption="示意：從岸邊看湖" />
+
+### 這一章怎麼走
+
+| 步驟 | 做什麼 | 接下來要處理的 |
+| --- | --- | --- |
+| [第一步](#第一步：自己取出水面後方的畫面) | 自己取出水面後方的畫面 | 淺水變得比岸上還亮 |
+| [第二步](#第二步：換掉混色的方式) | 換掉混色的方式 | 水下仍然筆直 |
+| [第三步](#第三步：依細波紋-offset-sampling-的位置) | 依細波紋 offset sampling 的位置 | 石頭露出水面的部分被拉進水裡 |
+| [第四步](#第四步：不要取到水面前方的東西) | offset 後取到水面前方的東西時退回 | 魚的顏色和輪廓對不上 |
+| [第五步](#第五步：顏色跟著扭曲後的背景走) | 用扭曲後的位置重算厚度 | 浪經過時水下不跟著偏 |
+| [第六步](#第六步：讓大浪也偏折) | offset 改用含大浪的 world normal，再除以 depth | 新參數只在 Material 上 |
+| [第七步](#第七步：把新參數搬進設定資產) | 參數搬進設定資產 | 折射的 node 攤在主 graph 上 |
+| [第八步](#第八步：把這一章的-node-收成-Sub-Graph) | 把折射的 node 收成兩個 Sub Graph | |
+
+[第一步](#第一步：自己取出水面後方的畫面)到[第七步](#第七步：把新參數搬進設定資產)之後都有「現在應該看到」與對照表，[第六步](#第六步：讓大浪也偏折)以外都附示意圖；[第八步](#第八步：把這一章的-node-收成-Sub-Graph)只整理 graph，水面不變。示意圖都是站在岸邊、看向對岸：上方灰色的是對岸，左邊是半泡的石頭，中間偏右是沉底的石頭，右下是魚。示意圖這樣擺；你的位置不同時，對應找同類的物件。檢查時可以用一顆離岸較遠的半泡石頭和一條水面下 0.5 公尺的魚。
+
+## 第一步：自己取出水面後方的畫面
+
+### 為什麼要讓 shader 自己取
+
+**折射要讓每個像素改顯示旁邊一點的湖底，所以 shader 必須能決定湖底從畫面上的哪個位置取；但現在的湖底是 GPU 在 shader 跑完之後，從同一個像素混進來的，shader 碰不到它。所以[第一步](#第一步：自己取出水面後方的畫面)讓 shader 自己從水畫之前的畫面讀出湖底，做出和 GPU 混進來的那份一樣的湖底。**
+
+位置先照舊取這個像素自己的，所以這一步做完畫面還不會扭曲；但取的位置從此是 shader 手上的一個輸入，[第三步](#第三步：依細波紋-offset-sampling-的位置)只改這個輸入，水下的東西就會跟著細波紋晃。
+
+下面依序展開這句話：現在的湖底怎麼來、為什麼 shader 改不了它；水畫之前的畫面去哪裡讀；讀到之後要乘上什麼、接到哪裡，才和原本那份一樣。
+
+### 現在的湖底是誰畫上去的
+
+先回想 [Depth Coloring](depth-coloring.html) 做完時，Fragment 區接了什麼：算厚度、透明度與泡沫的 node 已經收成三個 [[Sub Graph]]，下面的量都從它們的輸出接出來。從透光率一路往上算：
+
+$$\tau = e^{-kh}, \qquad \alpha = \operatorname{saturate}(1 - \tau)$$
+
+$$C_{\text{water}} = \operatorname{lerp}(C_{\text{shallow}},\ C_{\text{deep}},\ \alpha)$$
+
+$$C_{\text{base}} = \operatorname{lerp}(C_{\text{water}},\ C_{\text{foam}},\ f), \qquad \alpha' = \operatorname{lerp}(\alpha,\ 1,\ f)$$
+
+Base Color block 接 $C_{\text{base}}$ (Depth Coloring 記作 $C$，這裡加上下標，因為它就是接 Base Color 的值)，Alpha block 接 $\alpha'$。
+
+| 符號 | 意思 | graph 裡從哪接 |
+| --- | --- | --- |
+| $h$ | 視線從水面走到後面那個東西的距離，也就是水的厚度 | `SSG_Thickness` 的 Thickness |
+| $\tau$ | 透光率：湖底的光穿過厚度 $h$ 的水之後剩下的比例。$k$ 由清澈度決定，水越厚 $\tau$ 越小 | `SSG_Absorption` 的 Transmittance |
+| $\alpha$ | 水擋掉的比例，也是水色佔的比例 | `SSG_Absorption` 的 Opacity |
+| $C_{\text{shallow}}$、$C_{\text{deep}}$ | ShallowColor、DeepColor；$C_{\text{water}}$ 依 $\alpha$ 從淺水色漸變到深水色 | Property；$C_{\text{water}}$ 是水色的 Lerp |
+| $f$ | 泡沫的遮罩：1 是泡沫，0 是沒有泡沫 | `SSG_Foam` 的 Foam |
+| $C_{\text{foam}}$ | FoamColor | Property |
+| $\alpha'$ | 加上泡沫之後的 Alpha：泡沫處是 1，不透明 | 泡沫 Alpha 的 Lerp |
+
+[畫面上的顏色怎麼混出來](depth-coloring.html#畫面上的顏色怎麼混出來) 寫過混色式 $C_{\text{out}} = \alpha\,C_{\text{water}} + (1 - \alpha)\,C_{\text{behind}}$，那裡的水色指 Base Color 打過光之後的顏色。這一章要分清楚哪些顏色會被打光，所以把打光寫成 $\mathcal{L}(\cdot)$：給它 Base Color，它還你 URP Lit 打過光的顏色。混色式寫成：
+
+$$C_{\text{out}} = \alpha'\,\mathcal{L}(C_{\text{base}}) + (1 - \alpha')\,C_{\text{behind}}$$
+
+$C_{\text{behind}}$ 是這個像素在畫水之前就已經在那裡的顏色：水面後方的湖底、石頭或魚。沒有泡沫的地方 $f = 0$，所以 $\alpha' = \alpha$、$C_{\text{base}} = C_{\text{water}}$，再代入 $1 - \alpha = \tau$：
+
+$$C_{\text{out}} = \alpha\,\mathcal{L}(C_{\text{water}}) + \tau\,C_{\text{behind}}$$
+
+畫面上的湖底就是 $\tau\,C_{\text{behind}}$ 這一項：穿過水之後剩下 $\tau$ 的湖底光。
+
+這一項不是 shader 算的。shader 只交出 Base Color 和 Alpha 這些 block 的值；GPU 在 shader 跑完之後，才拿畫面上這個像素原本的顏色當 $C_{\text{behind}}$ 混進來。因為 $C_{\text{behind}}$ 固定取同一個像素，而且取的動作發生在 shader 之外，所以 shader 只決定得了 $C_{\text{base}}$ 和 $\alpha'$，沒辦法說「這個像素改用旁邊那個像素的湖底」。要讓 shader 能挑位置，就得由 shader 自己做出 $\tau\,C_{\text{behind}}$ 這一項：自己讀到水面後方的畫面，再乘上 $\tau$。
+
+### 從 opaque texture 自己讀：Scene Color
+
+[Shader Basics](shader-basics.html) 講過，URP 在畫完 opaque 物體 和天空、還沒畫水的那一刻，會把畫面拍一張快照，叫 [[opaque texture]]。裡面有湖底、石頭、魚和天空，沒有水面自己，所以快照上每個位置的顏色，就是那個位置的 $C_{\text{behind}}$。shader 讀這張快照時可以指定位置，這正是 GPU 混色給不了的。
+
+**Scene Color** node (Create Node > Input > Scene > Scene Color) 讀這張快照：
+
+| 埠 | 型別 | 用途 |
+| --- | --- | --- |
+| UV | Vector 4 | 要取畫面上哪個位置：screen position，0 到 1。不接時就是這個像素自己的位置 |
+| Out | Vector 3 | 那個位置的顏色，記作 $C_{\text{scene}}$ |
+
+它只能接在 Fragment 區。UV 這個埠，就是[第三步](#第三步：依細波紋-offset-sampling-的位置)要改的位置。
+
+screen position 由 **Screen Position** node 提供，Mode 選 **Default**：除以 $w$ 之後的位置，$x$、$y$ 都在 0 到 1 之間，(0, 0) 在螢幕左下角。graph 裡已經有一個 Mode 是 Raw 的 Screen Position (算厚度用的)，這裡要另外加一個 Default 的。
+
+UV 取這個像素自己的位置時，$C_{\text{scene}}$ 和 $C_{\text{behind}}$ 是同一個顏色。
+
+### 先確認 Opaque Texture 是開的
+
+[URP Setup](urp-setup.html) 已經開過，這裡確認一次：
+
+1. Project 視窗搜尋 `t:universalrenderpipelineasset`，每一個 URP Asset 的 **Rendering** 區塊，**Opaque Texture** 都是勾選的。同一區塊的 **Opaque Downsampling** 記下目前的值 (見「請回報」)。
+2. 兩台攝影機的 Camera Component，**Opaque Texture** 是 Use Pipeline Settings 或 On。
+
+沒開的話 Scene Color 拿不到畫面 (會變成什麼樣子官方沒有寫)。Graph Settings 不必改：水已經是 Transparent，會在快照拍好之後才畫；Scene Color 的官方說明也要求 Transparent。
+
+### 乘上透光率，接到 Emission
+
+shader 自己做的這一項要等於 $\tau\,C_{\text{behind}}$，所以 $C_{\text{scene}}$ 還要乘上什麼、接到哪個 block，各有一個理由：
+
+1. 乘上 $\tau$
+
+   湖底的光穿過水只剩 $\tau$。graph 裡 $\tau$ 是 `SSG_Absorption` 的 Transmittance 輸出，直接拿來乘：
+
+   $$E = \tau\,C_{\text{scene}}$$
+
+2. 接 Emission，不接 Base Color
+
+   因為 $C_{\text{scene}}$ 是畫面上已經照過光的顏色 (被太陽照亮的湖底)，接到 Base Color 會被 $\mathcal{L}$ 再打一次光：背光的地方變暗、再被光的顏色染一次。Emission block 收一個 RGB 顏色 (上式的 $E$)，URP 把它直接加在 Base Color 打光後的顏色上，不再打光，所以自己取的湖底原樣進到輸出。
+
+### 接線
+
+1. 加入 node
+
+   <ex-fig of="scene-color-transmittance-graph" caption="[第一步](#第一步：自己取出水面後方的畫面)的 graph。綠框是新加的 node 與線" />
+
+   | node | 設定 | 輸入接什麼 | 算出 |
+   | --- | --- | --- | --- |
+   | Screen Position | Mode：**Default** | | 這個像素的 screen position $\mathbf{u}_0$ |
+   | Scene Color | | UV ← Screen Position | $C_{\text{scene}}$ |
+   | Multiply | | A ← Scene Color；B ← `SSG_Absorption` 的 Transmittance ($\tau$) | $\tau\,C_{\text{scene}}$ |
+   | Fragment 的 Emission | | ← Multiply | |
+
+   UV 不接也是同一個位置；接上 Screen Position，是為了[第三步](#第三步：依細波紋-offset-sampling-的位置)在這裡加上 offset。
+
+2. 按 Save Asset
+
+### 現在應該看到
+
+- 淺水變得比岸上的地面還亮，湖底像在發光；石頭在水下的部分、淺處的魚也變亮。
+- 湖心幾乎沒有變化。
+- 水下的東西仍然筆直。
+
+淺水變亮是這一步預期的結果，下一節說明原因。
+
+<ex-fig of="scene-color-brightness-check" caption="示意：從岸邊看湖" />
+
+| 看到的現象 | 原因通常是 | 怎麼修 |
+| --- | --- | --- |
+| 和原本一樣 | Emission 沒接，或 Multiply 的 A 沒接 Scene Color | 照表接 |
+| 湖心也變亮，越深越亮 | Multiply 的 B 接成 `SSG_Absorption` 的 Opacity ($\alpha$) | B ← Transmittance |
+| 水面上的影像和湖底錯開，攝影機一動就滑 | Screen Position 的 Mode 是 Raw | 改成 Default |
+| 水面沒有出現湖底的影像 | Opaque Texture 沒開 | 見「先確認 Opaque Texture 是開的」 |
+
+### 淺水為什麼變亮：湖底有兩份
+
+這一步做完，shader 手上有了一份自己取的湖底 $\tau\,C_{\text{scene}}$，取的位置接在 Scene Color 的 UV 上，這正是折射要的。但 GPU 的混色沒有關，它照樣把 $(1 - \alpha')\,C_{\text{behind}}$ 混進來。
+
+因為 Preserve Specular Lighting 是勾選的 (Depth Coloring 維持的預設)，$\alpha'$ 在 shader 裡就先乘在打光後的 Base Color 上，Emission 的 $E$ 不乘 $\alpha'$、原樣加進去；GPU 混色時再加上後方畫面的那一份：
+
+$$C_{\text{shader}} = \alpha'\,\mathcal{L}(C_{\text{base}}) + E$$
+
+$$C_{\text{out}} = C_{\text{shader}} + (1 - \alpha')\,C_{\text{behind}}$$
+
+$E = 0$ 時，這就是上面的混色式。沒有泡沫的地方代入 $E = \tau\,C_{\text{scene}}$ 與 $1 - \alpha = \tau$：
+
+$$C_{\text{out}} = \alpha\,\mathcal{L}(C_{\text{water}}) + \tau\,C_{\text{scene}} + \tau\,C_{\text{behind}}$$
+
+| 項 | 從哪來 |
+| --- | --- |
+| $\alpha\,\mathcal{L}(C_{\text{water}})$ | Base Color 打光後，在 shader 裡乘上 $\alpha$ |
+| $\tau\,C_{\text{scene}}$ | 這一步接的 Emission |
+| $\tau\,C_{\text{behind}}$ | GPU 混進來的後方畫面 |
+
+$C_{\text{scene}}$ 和 $C_{\text{behind}}$ 是同一張畫面上同一個位置的顏色，所以湖底有兩份。淺水 $\tau \approx 1$，兩項都是整份湖底，亮了一倍；湖心 $\tau \approx 0$，兩項都接近 0，所以看不出差別。這就是上面看到的變亮，它也表示 Scene Color 確實取到了畫面。泡沫的地方 $\alpha' = 1$，GPU 那一份本來就是 0，但 $E$ 照樣加上去，泡沫上也疊了一份湖底。
+
+簡化：URP 實際上只把 $\alpha'$ 乘在 diffuse (往各方向散開的光，顏色由 Base Color 決定) 上，specular highlight 不乘：
+
+$$C_{\text{shader}} = \alpha'\,\mathcal{L}_{\text{diff}}(C_{\text{base}}) + \mathcal{L}_{\text{spec}} + E$$
+
+湖底的兩項不在 specular 裡，所以湖底有兩份的結論不變。
+
+兩份湖底不只是太亮。[第三步](#第三步：依細波紋-offset-sampling-的位置)要扭曲的是 $\tau\,C_{\text{scene}}$，$\tau\,C_{\text{behind}}$ 留著的話，扭曲的湖底上會疊著一份筆直的湖底，所以 GPU 混進來的那一份必須拿掉。shader 這邊能控制 GPU 混色的只有 Alpha：$\alpha' = 1$ 時 $(1 - \alpha')\,C_{\text{behind}} = 0$。可是 Alpha 同時是水自己顏色的權重，上式的 $\alpha'\,\mathcal{L}(C_{\text{base}})$ 也乘著它，只把 Alpha 填 1，水色會變成整份。所以下一步換掉混色的方式：關掉 GPU 的混色，原本由 Alpha 管的兩個權重改由 shader 自己乘。
+
+## 第二步：換掉混色的方式
+
+### 讓湖底只剩自己取的那一份
+
+**Alpha 填 1，GPU 就不再混進 $C_{\text{behind}}$，湖底只剩[第三步](#第三步：依細波紋-offset-sampling-的位置)能改位置的那一份；Alpha 原本管著的兩個權重 (後方畫面乘 $1 - \alpha'$、水自己的顏色乘 $\alpha'$) 改在 shader 裡自己乘：背景乘 $\tau$ 放 Emission，水自己的顏色乘 $\alpha$ 放 Base Color，畫面才會回到 Depth Coloring 的深淺。**
+
+先看只把 Alpha 填 1 會怎樣。代入上一步的兩條式子，$\alpha' = 1$：
+
+$$C_{\text{out}} = \mathcal{L}(C_{\text{base}}) + E$$
+
+GPU 那一份歸零了，這正是要的；但水自己的顏色從 $\alpha\,\mathcal{L}(C_{\text{water}})$ 變成整份 $\mathcal{L}(C_{\text{water}})$。淺水 $\alpha \approx 0$ 的地方，原本幾乎看不到的水色變成整份，湖底上蓋了一層打光後的 ShallowColor。
+
+所以剩下的工作，是讓 $E$ 和 $C_{\text{base}}$ 各自帶上原本由 Alpha 給的權重。下一節逐項決定它們的內容。
+
+### 新的混色：背景放 Emission，水自己的顏色放 Base Color
+
+先寫出這一步做完的樣子，再逐項說明為什麼這樣放：
+
+$$C_{\text{out}} = \underbrace{\tau\,(1 - f)\,C_{\text{tint}}\,C_{\text{scene}}}_{E} + \mathcal{L}\big(\underbrace{\operatorname{lerp}(\alpha\,C_{\text{deep}},\ C_{\text{foam}},\ f)}_{C_{\text{base}}}\big)$$
+
+$$C_{\text{tint}} = \operatorname{lerp}(\mathbf{1},\ C_{\text{shallow}},\ \alpha)$$
+
+$C_{\text{tint}}$ 是湖底的光穿過水之後被染上的顏色：水越厚染得越深，從白色 $\mathbf{1}$ (不染色) 漸變到 ShallowColor。染過色的湖底還要乘 $\tau$，所以畫面上 ShallowColor 的權重是 $\tau\,\alpha = \tau(1 - \tau)$，在 $\tau = 0.5$ 時最大：岸邊看到湖底本色，中等深度的湖底被染成淺水色，湖心由深水色接手。graph 裡的 $\alpha$ 照舊是 `SSG_Absorption` 的 Opacity；算 $\alpha'$ 的 Lerp 不再用到。
+
+1. 背景乘 $\tau$，放 Emission
+
+   這是 GPU 原本給後方畫面的權重：沒有泡沫處 $1 - \alpha' = \tau$。[第一步](#第一步：自己取出水面後方的畫面)已經接好，$E$ 原樣加在打光後的顏色上，不再打光。
+
+2. 背景再乘染色 $C_{\text{tint}}$
+
+   GPU 混色只能把背景乘上一個數 $1 - \alpha'$，紅、綠、藍是同一個比例，水色只能另外疊一層上去。背景到了 shader 手上，就能乘上一個顏色。因為水對紅、綠、藍的吸收量不同，所以穿過水的湖底光本身會被染色，水越厚染得越深；$C_{\text{tint}}$ 就是這層染色。淺水色因此從疊在湖底上的一層，改成染在湖底上的顏色。簡化：實際上紅、綠、藍各有自己的 $k$，三個 $\tau$ 各不相同；這裡只算一個 $\tau$，染色用 $C_{\text{tint}}$ 從白色漸變到 ShallowColor 粗略近似。
+
+3. 水自己的顏色乘 $\alpha$，只留深水色，放 Base Color
+
+   這是 GPU 原本給水色的權重 $\alpha'$，改在 shader 裡乘。深水的顏色是水裡散射出來的光，該跟著太陽變亮變暗，所以放 Base Color 讓 $\mathcal{L}$ 打光；它佔的比例是湖底被擋掉的那部分，乘上 $\alpha$。淺水色已經改成染在背景上，所以 Base Color 只留 $\alpha\,C_{\text{deep}}$，不再是 $C_{\text{water}}$。
+
+4. 泡沫不透光：背景乘 $1 - f$
+
+   原本泡沫處 $\alpha' = 1$，由 GPU 擋掉後方；現在 Alpha 一律是 1，這件事也要自己做，否則[第一步](#第一步：自己取出水面後方的畫面)看到的泡沫上疊湖底會留著。泡沫處 $f = 1$：Base Color 變成泡沫色，背景乘上 $1 - f = 0$，不會從泡沫後面透出來。
+
+在兩端與泡沫處代入，結果和 Depth Coloring 接得上：
+
+| 位置 | Emission | Base Color | 看起來 |
+| --- | --- | --- | --- |
+| 水邊線 $\tau = 1$、$\alpha = 0$ | $C_{\text{scene}}$ (不染色) | 黑 (只剩 specular highlight) | 原本的湖底，和岸上接得起來 |
+| 湖心 $\tau = 0$、$\alpha = 1$ | 0 | $C_{\text{deep}}$ | 和 Depth Coloring 的深水相同 |
+| 泡沫 $f = 1$ | 0 | $C_{\text{foam}}$ | 不透明的泡沫 |
+
+中間的深度不會和 Depth Coloring 完全一樣。例：$h = 1.5$ 公尺時 $\tau = 0.25$、$\alpha = 0.75$，沒有泡沫處兩種混色分別是：
+
+$$C_{\text{out,old}} = 0.75\,\mathcal{L}(0.25\,C_{\text{shallow}} + 0.75\,C_{\text{deep}}) + 0.25\,C_{\text{behind}}$$
+
+$$C_{\text{out,new}} = 0.25\,(0.25 \cdot \mathbf{1} + 0.75\,C_{\text{shallow}})\,C_{\text{scene}} + \mathcal{L}(0.75\,C_{\text{deep}})$$
+
+湖底一樣剩 25%；差在淺水色從加在湖底上的一層，改成乘在湖底上的染色，深水色的份量也從 $0.75 \times 0.75 \approx 0.56$ 變成 0.75。
+
+### 接線
+
+1. Alpha 改成 1
+
+   刪除接到 Alpha block 的線，在欄位填 **1**。原本接 Alpha 的 Lerp (算 $\alpha'$ 的泡沫 Alpha 那個) 不再用到，刪掉。
+
+2. 原本的水色 Lerp 改成染色
+
+   原本的 Lerp (A ← ShallowColor、B ← DeepColor) 改接：A 的線拔掉，欄位填 **1, 1, 1, 1** (白色)；B 改接 **ShallowColor**；T 照舊接 `SSG_Absorption` 的 Opacity ($\alpha$)。
+
+3. 其餘的 node
+
+   <ex-fig of="scene-color-tint-emission-graph" caption="[第二步](#第二步：換掉混色的方式)的 graph。綠框是新加或改接的 node 與線" />
+
+   | node | 輸入接什麼 | 算出 |
+   | --- | --- | --- |
+   | Multiply | A ← DeepColor；B ← `SSG_Absorption` 的 Opacity ($\alpha$) | $\alpha\,C_{\text{deep}}$ |
+   | Lerp (泡沫色那個，已有) | A ← 上面的 Multiply (取代原本的水色 Lerp)；B、T 不變 | Base Color 的值 |
+   | Multiply | A ← 染色的 Lerp；B ← [第一步](#第一步：自己取出水面後方的畫面)的 Multiply | $\tau\,C_{\text{tint}}\,C_{\text{scene}}$ |
+   | One Minus | In ← `SSG_Foam` 的 Foam ($f$) | $1 - f$ |
+   | Multiply | A ← 上一個 Multiply；B ← One Minus | Emission 的值 |
+   | Fragment 的 Emission | ← 最後的 Multiply (取代[第一步](#第一步：自己取出水面後方的畫面)的線) | |
+
+4. 按 Save Asset
+
+公式與 node 的對照 (只是對照，不必輸入)：
+
+```hlsl 對照：第二步的 node 等於這幾行
+float3 tint = lerp(float3(1, 1, 1), ShallowColor.rgb, alpha);
+float3 emission = tau * tint * sceneColor * (1 - f);              // 接 Emission
+float3 baseColor = lerp(alpha * DeepColor.rgb, FoamColor.rgb, f);  // 接 Base Color
+// Alpha 填 1
+```
+
+### 現在應該看到
+
+- 淺水的亮度回到正常，和岸上的地面接得起來；水邊線看不出接縫。
+- 深淺的分布和上一章相近：淺水見底，越深越暗、越偏藍綠，湖心是深水色。
+- 泡沫是不透明的白色。
+- 太陽的 specular 與細波紋都還在。水下的東西仍然筆直。
+- 透過水看到的湖底可能比岸上稍微模糊：Opaque Downsampling 是 2x Bilinear 時，快照只有一半的解析度 (見章尾的「效能」)。
+
+<ex-fig of="scene-color-tint-check" caption="示意：從岸邊看湖" />
+
+| 看到的現象 | 原因通常是 | 怎麼修 |
+| --- | --- | --- |
+| 淺水仍然比岸上亮 | Alpha 還接著原本的值 | 拔掉線，填 1 |
+| 整片不透明，看不到湖底 | Emission 沒接上，或其中一個 Multiply 少接一個輸入 | 照表接 |
+| 水邊線一圈偏暗的藍綠，和岸上接不起來 | 染色 Lerp 的 A、B 反了 (淺處反而染滿) | A 填白色、B ← ShallowColor |
+| 淺水是一片白霧 | Base Color 那條接成了染色的 Lerp | 泡沫色 Lerp 的 A ← $\alpha\,C_{\text{deep}}$ 的 Multiply |
+| 泡沫是半透明的，看得到後面的石頭 | Emission 少乘 $1 - f$ | 補上 One Minus 與 Multiply |
+| 湖底在背光處變很暗、帶著光的顏色 | 背景接到了 Base Color | 背景只接 Emission |
+
+到這裡畫面回到 Depth Coloring 的深淺，水下的東西仍然筆直；但水面後方的畫面已經只由 shader 自己取，取哪裡由 Scene Color 的 UV 決定。下一步就改這個 UV：先看水下的東西為什麼會晃，再決定 UV 要往哪偏、偏多遠。
+
+## 第三步：依細波紋 offset sampling 的位置
+
+### 讓每個像素取旁邊一點的畫面
+
+**真的水下會晃，是因為細波紋讓每個像素的 normal 各自傾斜，折進水裡的視線跟著偏，看到的湖底就移到旁邊一點。所以這一步讓 Scene Color 的 UV 偏離這個像素自己的位置，偏多遠、往哪偏跟著細波紋的 normal 走；不去算真正的光路，只模仿「看到的位置跟著 normal 移動」這個結果。**
+
+下面依序展開：真的折射為什麼讓湖底移動；在螢幕上怎麼用 normal 近似這個移動；為什麼岸邊不能偏；偏出畫面時會怎樣。
+
+### 為什麼水下的東西會晃
+
+[Vector Math](vector-math.html) 的 Snell 定律說，視線從空氣進入水會偏折：
+
+$$\sin\theta_1 = 1.33\,\sin\theta_2$$
+
+$\theta_1$、$\theta_2$ 是視線在空氣裡、水裡和 normal 的夾角，1.33 是水的折射率。因為 $\theta_2$ 由視線和 normal 的夾角決定，所以細波紋讓 normal 傾斜，折進水裡的視線就跟著轉向，碰到湖底的位置也跟著移動。
+
+<iframe src="../_diagram/interactive/normal-tilt-refraction-shift/index.html" title="細波紋讓 normal 傾斜時，看到的湖底移多少？(一個方向的切面)" style="height:540px"></iframe>
+
+例：視線和水面的 normal 夾 60 度時，平靜的水面 $\theta_2 = 40.6°$。細波紋讓 normal 往一側偏 9 度，折進水裡的視線和垂直方向的夾角變成約 35.6°。水深 $H$ (垂直量的，不是沿視線的厚度 $h$) 處，看到的湖底移動
+
+$$\Delta = H\,(\tan 40.6° - \tan 35.6°) \approx 0.14\,H$$
+
+水深 1 公尺移動約 14 公分，2 公尺就約 28 公分。波紋一直在漂，每個像素看到的湖底就一直在附近移動：這就是晃動。
+
+### 在螢幕上近似：把 normal 的 xy 加到 UV
+
+真的去算每條視線折進水裡、碰到湖底的哪一點，要知道湖底的形狀，很貴。這裡只模仿結果：**這個像素改顯示畫面上旁邊一點的東西，偏多遠、往哪偏跟著細波紋的 normal 走**。
+
+細波紋的 normal $\mathbf{n}$ 是 [Flow Normals](flow-normals.html) 最後那個 Normal Strength (接 Normal block 的那個) 的輸出，是 tangent space 的方向：(0, 0, 1) 是沒有傾斜，$n_x$、$n_y$ 是往兩個方向傾斜多少。Normal Strength 只把 $x$、$y$ 乘上它的 Strength，所以
+
+$$(n_x,\ n_y) = S\,F\,(m_x,\ m_y)$$
+
+$\mathbf{m}$ 是 Normal Blend 疊好的兩層波紋，$S$ 是 `RippleStrength`，$F$ 是遠處淡出 (近處 1，`RippleFadeDistance` 之外 0)。
+
+把 $n_x$、$n_y$ 乘上強度，加到[第一步](#第一步：自己取出水面後方的畫面)接進 Scene Color 的 screen position $\mathbf{u}_0$ 上：
+
+$$\mathbf{u}_1 = \mathbf{u}_0 + \mathbf{o}, \qquad \mathbf{o} = R \cdot \operatorname{saturate}(h) \cdot (n_x,\ n_y)$$
+
+| 符號 | 意思 |
+| --- | --- |
+| $\mathbf{u}_0$ | 這個像素的 screen position (Screen Position，Default)，[第一步](#第一步：自己取出水面後方的畫面)接在 Scene Color 的 UV 上 |
+| $(n_x,\ n_y)$ | 細波紋 normal 的 $x$、$y$ |
+| $R$ | `RefractionStrength`：offset 的強度，預設 0.05 |
+| $h$ | 水的厚度，公尺 ([第一步](#第一步：自己取出水面後方的畫面)回顧過的 $h$，`SSG_Thickness` 的 Thickness) |
+| $\mathbf{o}$ | offset，screen position 的單位 (1 是整個畫面) |
+| $\mathbf{u}_1$ | 加上 offset 的位置，改接到 Scene Color 的 UV |
+
+例：細波紋的 normal $xy$ 常見的大小約 0.2，$h \ge 1$ 時 offset $0.05 \times 0.2 = 0.01$。在 2560 × 1440 的畫面上，橫向約 26 個像素、縱向約 14 個像素。
+
+和真的折射差在哪：
+
+- 方向只是跟著波紋變，不是真的折射方向。normal 往世界的 $+x$ 傾斜時，畫面上往哪邊偏，取決於你從哪個方向看。
+- offset 不會隨水深一直變大。上面例子裡真的折射移動 $0.14\,H$，跟著水深一直變大；這裡乘的 $\operatorname{saturate}(h)$ 最多是 1，最多偏到 1 公尺的程度。
+- 因為 $(n_x,\ n_y)$ 乘著遠處淡出 $F$，所以遠處的水下也幾乎不扭曲。
+
+這套水要的是水下跟著波紋晃，不是精確的光路，這樣就夠了。
+
+### 岸邊不偏：乘上厚度
+
+$\operatorname{saturate}(h)$ 把厚度夾在 0 到 1 之間：$h = 0.3$ 時 offset 是完整的 30%，$h \ge 1$ 公尺時是完整的 offset。
+
+因為水邊線上 $h \approx 0$，在畫面上，水面的像素緊鄰岸上的像素。offset 不縮小的話，水邊的像素會取到岸上的地面，水邊線變成一條一直在抖的鋸齒。乘上 $\operatorname{saturate}(h)$ 之後，水邊線上的 offset 是 0，水下的湖底和岸上的地面接得起來；半泡石頭的接觸處也一樣。這也符合真的折射：上面的 $\Delta$ 和 $H$ 成正比，水越薄，湖底移動得越少。
+
+### 畫面邊緣
+
+靠近畫面邊緣的像素，加上 offset 後可能超出 0 到 1。依 URP 的原始碼，這時會取到畫面最邊緣那一排的顏色，邊緣幾個像素看起來略為拉長，不會繞到畫面另一邊。offset 只有幾個到十幾個像素，這一章不處理。
+
+### 接線
+
+1. 建立 Property
+
+   Blackboard **+** > **Float**：Name `RefractionStrength`、Mode **Slider** (Min 0、Max 0.2)、Default Value **0.05**、Scope **Per Material**、Show In Inspector 勾選。確認 Reference 是 `_RefractionStrength`。
+
+2. 接線
+
+   <ex-fig of="refraction-uv-offset-graph" caption="[第三步](#第三步：依細波紋-offset-sampling-的位置)的 graph。綠框是新加的 node 與線" />
+
+   | node | 設定 | 輸入接什麼 | 算出 |
+   | --- | --- | --- | --- |
+   | Swizzle | Mask：**xy** | In ← Normal Strength (細波紋，接 Normal block 的那個) | $(n_x,\ n_y)$ |
+   | Saturate | | In ← `SSG_Thickness` 的 Thickness ($h$) | $\operatorname{saturate}(h)$ |
+   | RefractionStrength (Property) | | | $R$ |
+   | Multiply | | A ← RefractionStrength；B ← Saturate | |
+   | Multiply | | A ← Swizzle；B ← 上一個 Multiply | $\mathbf{o}$ |
+   | Add | | A ← [第一步](#第一步：自己取出水面後方的畫面)的 Screen Position (Default)；B ← 上一個 Multiply | $\mathbf{u}_1$ |
+   | Scene Color | | UV ← Add (取代 Screen Position 的線) | |
+
+   Normal Strength 的輸出同時接 Normal block 和 Swizzle；一個輸出可以接好幾條線。
+
+3. 按 Save Asset
+
+```hlsl 對照：第三步的 node 等於這幾行
+float2 o = rippleNormal.xy * RefractionStrength * saturate(h);   // rippleNormal：Normal Strength 的輸出
+float2 uv1 = screenPos.xy + o;                                    // screenPos：Screen Position (Default)
+float3 sceneColor = SampleSceneColor(uv1);                        // Scene Color 節點
+```
+
+`SampleSceneColor` 是 URP 裡 Scene Color node 實際呼叫的函式。
+
+### 現在應該看到
+
+- 水下的東西跟著細波紋晃動：石頭在水下的輪廓、魚的輪廓一直在微微扭動。攝影機貼近水面時最明顯。
+- 水邊線和石頭的接觸處穩定，不抖。
+- 遠處的水下幾乎不扭曲。
+- Material 上的 RefractionStrength 改成 0：回到筆直；改成 0.2：晃得很厲害。看完改回 0.05。
+- 看半泡石頭後方、緊貼它輪廓的水：石頭露出水面那部分的顏色，可能變成碎片出現在這圈水裡。原因見下一節。
+
+<ex-fig of="refraction-distortion-check" caption="示意：從岸邊看湖" />
+
+| 看到的現象 | 原因通常是 | 怎麼修 |
+| --- | --- | --- |
+| 水下仍然筆直 | Scene Color 的 UV 還接著 Screen Position；或 RefractionStrength 是 0 | UV ← Add；Default Value 填 0.05 |
+| 水邊線在抖，岸上的地面被拉進水裡 | 少了 Saturate ($h$)，或它沒有乘進 offset | 照表接 |
+| 水下的影像整片往一邊錯開 | Swizzle 的 Mask 不是 xy (例如 xz：$n_z \approx 1$，offset 變成固定的一大段) | 改成 xy |
+| 遠處的水下也扭得一樣厲害 | Swizzle 接到 Normal Blend 的輸出 (還沒乘上遠處淡出) | 改接 Normal Strength |
+
+### 石頭的碎片從哪來
+
+這一步做完，水下跟著波紋晃了。但 offset 只管「偏到畫面上旁邊一點」，不管那一點上是什麼：opaque texture 裡不只有水面後方的東西，也有水面前方、露出水面的東西。
+
+$P$ 是半泡石頭後方的水面，它的視線從石頭頂上擦過；稍低一點的相鄰視線打在石頭露出水面的部分 $Q$，所以畫面上 $P$ 緊鄰著 $Q$ 那一格。水的 shader 在 $P$ 算出 offset，跨過石頭的輪廓時，$\mathbf{u}_1$ 就落在 $Q$ 那一格；opaque texture 那一格存的是 $Q$，$P$ 就顯示了石頭的顏色。因為 $P$ 緊貼著輪廓，波紋平常幾個像素的 offset 就跨得過去，所以碎片出現在石頭邊緣一圈。
+
+<ex-fig of="refraction-foreground-leak" caption="示意：側面" />
+
+$Q$ 在水面前方，光不會先穿過 $P$ 的水再到 $Q$，所以它本來就不該出現在 $P$ 的水裡。所以下一步在用 $\mathbf{u}_1$ 之前先檢查：那裡的東西在水面後方才用，否則不偏。
+
+## 第四步：不要取到水面前方的東西
+
+### 只取水面後方的東西
+
+**offset 後的位置 $\mathbf{u}_1$ 要先確認還在水面後方：在 $\mathbf{u}_1$ 再讀一次 depth，比水面自己近，就表示取到了水面前方的東西，退回沒有 offset 的 $\mathbf{u}_0$。** 因為前後只看 depth 就分得出來，所以這一步只多讀一次 depth、多一次比較與選擇。
+
+先回想 Depth Coloring 怎麼量厚度：兩個 eye depth (沿攝影機前方量的距離，公尺) 相減，再夾在 0 以上，`SSG_Thickness` 裡的 Subtract 與 Maximum 就是這一條。
+
+$$h = \max(d_s - d_w,\ 0)$$
+
+| 符號 | 意思 | graph 裡從哪接 |
+| --- | --- | --- |
+| $d_s$ | Scene Depth (Eye) 在這個像素讀到的 depth：水面後方那個東西的距離。depth texture 在畫水之前就複製好了，所以裡面沒有水面 | Scene Depth (UV 不接)，接著 `SSG_Thickness` 的 SceneDepth |
+| $d_w$ | 水面自己這一點的距離：Screen Position (Raw) 的 $w$ | Split 的 A，接著 `SSG_Thickness` 的 SurfaceDepth |
+
+同一個 Scene Depth 改在 $\mathbf{u}_1$ 讀，記作 $d_1$，就是 $\mathbf{u}_1$ 那裡那個 opaque 東西的距離。拿它和水面的 $d_w$ 比，選出最後採用的位置 $\mathbf{u}$：
+
+$$\mathbf{u} = \begin{cases} \mathbf{u}_0 & d_1 < d_w \\ \mathbf{u}_1 & \text{otherwise} \end{cases}$$
+
+- $d_1 > d_w$：$\mathbf{u}_1$ 那裡的東西比水面遠，在水面後方，可以用。
+- $d_1 < d_w$：比水面近，在水面前方，退回 $\mathbf{u}_0$。
+
+例：$P$ 的水面 $d_w = 8$ 公尺。$\mathbf{u}_1$ 落在 $P$ 後方的湖底時，$d_1$ 大約是 9，可以用；落在露出水面的石頭 $Q$ 上時，$d_1$ 大約是 7.5，比 8 近，退回 $\mathbf{u}_0$。
+
+退回的像素沒有扭曲，所以石頭後方緊鄰的一小圈水下影像不晃。這比出現碎片不明顯。
+
+### 兩個新 node
+
+**Comparison** (Create Node 搜尋 Comparison)：
+
+| 埠 | 型別 | 用途 |
+| --- | --- | --- |
+| A、B | Float | 要比較的兩個值 |
+| Out | Boolean | 比較成立是 true |
+
+下拉選單選比較的方式：Equal、NotEqual、Less、LessOrEqual、Greater、GreaterOrEqual。這裡用 **Less**：$A < B$ 時是 true。
+
+**Branch** (Create Node 搜尋 Branch)：
+
+| 埠 | 型別 | 用途 |
+| --- | --- | --- |
+| Predicate | Boolean | 條件 |
+| True、False | Dynamic Vector | 條件成立、不成立時各輸出哪一個 |
+| Out | Dynamic Vector | 選出來的值 |
+
+兩邊都會先算好，再丟掉沒選到的那個，所以它不會省下計算。上面 $\mathbf{u}$ 的式子就是一個 Comparison ($d_1 < d_w$) 接一個 Branch (True 是 $\mathbf{u}_0$、False 是 $\mathbf{u}_1$)。
+
+### 接線
+
+<ex-fig of="refraction-depth-test-graph" caption="第四步的 graph。綠框是新加的 node 與線" />
+
+| node | 設定 | 輸入接什麼 | 算出 |
+| --- | --- | --- | --- |
+| Scene Depth | Sampling Mode：**Eye** | UV ← [第三步](#第三步：依細波紋-offset-sampling-的位置)的 Add | $d_1$ |
+| Comparison | **Less** | A ← 新的 Scene Depth；B ← 算厚度那個 Split 的 **A** ($d_w$) | $d_1 < d_w$ |
+| Branch | | Predicate ← Comparison；True ← [第一步](#第一步：自己取出水面後方的畫面)的 Screen Position (Default)；False ← [第三步](#第三步：依細波紋-offset-sampling-的位置)的 Add | 最後採用的 $\mathbf{u}$ |
+| Scene Color | | UV ← Branch (取代 Add 的線) | |
+
+新的 Scene Depth 是另外加的一個；原本算厚度的那個 (UV 不接) 不動。按 Save Asset。
+
+```hlsl 對照：第四步的 node 等於這幾行
+float d1 = SceneDepthEye(uv1);              // Scene Depth (Eye)，UV 接 uv1
+bool inFront = d1 < dw;                     // Comparison (Less)
+float2 uv = inFront ? screenPos.xy : uv1;   // Branch
+float3 sceneColor = SampleSceneColor(uv);
+```
+
+`SceneDepthEye` 代表 Scene Depth node，不是現成的函式。
+
+### 現在應該看到
+
+- 半泡石頭後方緊貼輪廓的水：碎片消失。緊鄰石頭的一小圈水下影像不晃。
+- 其他地方的扭曲和上一步一樣。
+
+<ex-fig of="refraction-leak-fix-check" caption="示意：從岸邊看湖" />
+
+| 看到的現象 | 原因通常是 | 怎麼修 |
+| --- | --- | --- |
+| 碎片還在 | Comparison 的 B 沒接 $d_w$；或新 Scene Depth 的 UV 沒接 Add | 照表接 |
+| 扭曲全部消失 | Branch 的 True、False 接反；Comparison 選成 Greater；或新 Scene Depth 的 Sampling Mode 不是 Eye (Linear 01 的值都小於 1，永遠比 $d_w$ 小) | 照表設定 |
+| 扭曲全部消失，只有石頭旁邊還有碎片 | True、False 接反 | True ← Screen Position、False ← Add |
+
+### 魚的亮邊
+
+到這裡，背景的顏色從最後採用的位置 $\mathbf{u}$ 取，而且只取水面後方的東西。但從[第三步](#第三步：依細波紋-offset-sampling-的位置)加上 offset 起，還有一處沒跟著改：攝影機貼近水面看水面下 0.5 公尺的魚，魚的影像被 offset 了，但魚的一側可能有一條亮邊，另一側被切暗。
+
+原因是背景的顏色和它的透光率不是在同一個位置量的。[第二步](#第二步：換掉混色的方式)接到 Emission 的是
+
+$$E = \tau\,(1 - f)\,C_{\text{tint}}\,C_{\text{scene}}(\mathbf{u}), \qquad \tau = e^{-kh}, \qquad h = \max(d_s - d_w,\ 0)$$
+
+$C_{\text{scene}}$ 已經改在 $\mathbf{u}$ 取，但 $d_s$ 還是在這個像素自己的位置 $\mathbf{u}_0$ 讀的，所以 $\tau$ 量的還是沒有 offset 的那一點。魚的正上方水薄、$\tau$ 大、顏色清楚；魚的影像移開之後，「清楚的那一塊」還留在原地：魚移出去的那一側用的是後方深處湖底的 $\tau$，被當成深水染暗；留下來的那一塊顯示的是魚後面的湖底，卻用了魚的透光率，變成亮邊。
+
+所以下一步讓厚度也在 $\mathbf{u}$ 量。
+
+## 第五步：顏色跟著扭曲後的背景走
+
+### 用同一個位置的 depth 重算厚度
+
+**顏色要和 Scene Color 取的是同一點，所以厚度也要在最後採用的 $\mathbf{u}$ 量：[第四步](#第四步：不要取到水面前方的東西)已經讀好兩個 depth，用同一個條件選出 $\mathbf{u}$ 那裡的 depth，算出新的厚度 $h_1$，$\tau$ 改用它。** 因為兩個 depth 都已經有了，所以不必再讀 depth texture，只多一次選擇與相減。
+
+[第四步](#第四步：不要取到水面前方的東西)的兩個 depth：沒有 offset 的 $d_s$ (原本算厚度的 Scene Depth) 和 offset 後的 $d_1$。最後採用 $\mathbf{u}_0$ 時取 $d_s$，採用 $\mathbf{u}_1$ 時取 $d_1$，條件和選 $\mathbf{u}$ 的那個相同：
+
+$$d_{\mathbf{u}} = \begin{cases} d_s & d_1 < d_w \\ d_1 & \text{otherwise} \end{cases}, \qquad h_1 = \max(d_{\mathbf{u}} - d_w,\ 0)$$
+
+$$\tau = e^{-k h_1}$$
+
+$\alpha = \operatorname{saturate}(1 - \tau)$ 和染色 $C_{\text{tint}}$ 都由 $\tau$ 算出來，所以也跟著改在 $\mathbf{u}$ 量。這樣魚的影像移到哪，魚那裡的薄水透光率就跟到哪，亮邊和切暗的一側都消失。
+
+offset 和泡沫照舊用原本的 $h$：
+
+- offset 要先有厚度才算得出來，$h_1$ 又要等 offset 決定之後才有，所以 offset 只能用 $h$。
+- 泡沫標的是水真正碰到東西的地方，不該跟著扭曲晃動。
+
+所以 $h_1$ 用再放一個 `SSG_Thickness` 算，原本那個照舊接 $d_s$：它的 Thickness 是 offset 的來源，改接 $d_{\mathbf{u}}$ 會繞回自己。
+
+### 接線
+
+<ex-fig of="refraction-offset-depth-thickness-graph" caption="第五步的 graph。綠框是新加的 node 與線" />
+
+| node | 輸入接什麼 | 算出 |
+| --- | --- | --- |
+| Branch | Predicate ← [第四步](#第四步：不要取到水面前方的東西)的 Comparison；True ← 原本的 Scene Depth ($d_s$)；False ← [第四步](#第四步：不要取到水面前方的東西)的 Scene Depth ($d_1$) | $d_{\mathbf{u}}$ |
+| `SSG_Thickness` (再放一個) | SceneDepth ← Branch；SurfaceDepth ← 算厚度那個 Split 的 **A** ($d_w$) | $h_1$ |
+| `SSG_Absorption` (已有) | Thickness ← 新的 `SSG_Thickness` (取代原本那個 `SSG_Thickness` 的線)；Clarity 不變 | 用 $h_1$ 算的 $\tau$、$\alpha$ |
+
+新的 `SSG_Thickness` 從 Project 視窗拖進來，或在 Create Node 搜尋。原本那個不改，`SSG_Foam` 和[第三步](#第三步：依細波紋-offset-sampling-的位置)的 Saturate 照舊接它。按 Save Asset。
+
+```hlsl 對照：第五步的 node 等於這兩行
+float h1 = max((inFront ? ds : d1) - dw, 0);   // Branch、新放的 SSG_Thickness
+float tau = exp(-k * h1);                      // SSG_Absorption 裡的 Multiply、Negate、Exponential
+```
+
+### 現在應該看到
+
+- 魚與石頭的顏色跟著扭曲後的輪廓走，邊緣沒有亮邊。
+- 泡沫照舊貼著水邊線和石頭，不跟著扭曲晃動。
+- 深淺的分布和上一步一樣。
+
+<ex-fig of="refraction-color-follows-distortion-check" caption="示意：從岸邊看湖" />
+
+| 看到的現象 | 原因通常是 | 怎麼修 |
+| --- | --- | --- |
+| 魚的一側仍有亮邊 | `SSG_Absorption` 的 Thickness 還接著原本那個 `SSG_Thickness` | Thickness ← 新的 `SSG_Thickness` |
+| 泡沫的邊緣在抖 | `SSG_Foam` 的 Thickness 也改接了新的 `SSG_Thickness` | 改回原本那個 |
+| 石頭旁邊一圈顏色不對 | 新 Branch 的 True、False 接反 | True ← 原本的 Scene Depth、False ← [第四步](#第四步：不要取到水面前方的東西)的 Scene Depth |
+
+到這裡，水下跟著細波紋扭曲，顏色也跟著扭曲後的輪廓走。但看大浪經過的地方：水面的明暗跟著浪起伏，水下的東西卻不跟著偏，只有細波紋的扭動。下一步讓 offset 也跟著大浪。
+
+## 第六步：讓大浪也偏折
+
+### offset 改用打光用的 normal
+
+**浪經過時水下不偏，是因為 offset 用的 $(n_x,\ n_y)$ 只有細波紋。所以這一步把 $\mathbf{n}$ 轉到 world space，取 URP 打光實際用的水面 normal 的水平分量，大浪的坡面就在裡面；再除以水面後方那個東西的 depth，讓同樣的傾斜在近處、遠處偏移差不多的世界距離。**
+
+下面依序展開：大浪為什麼不在 $(n_x,\ n_y)$ 裡；怎麼轉到 world space；轉完之後遠處為什麼扭得過頭、除以 depth 怎麼修；強度要改成多少。
+
+### 大浪為什麼不在細波紋的 normal 裡
+
+細波紋的 normal 是相對大浪的坡面 ([Flow Normals](flow-normals.html#Normal-(Tangent-Space)-是相對於大波浪的))：tangent space 的 (0, 0, 1) 就是 Gerstner normal 在這一點的方向。因為 $(n_x,\ n_y)$ 只記「在大浪坡面上再斜多少」，所以浪的坡面再斜，只要細波紋一樣，offset 就一樣。
+
+例：主浪 Wave0 的陡度 $S = 0.16$。[Gerstner Waves](gerstner-waves.html) 的 normal 是 $N = (-S\cos\varphi,\ 1 - S\sin\varphi,\ 0)$，上坡中點 $\varphi = 0$ 時是 $(-0.16,\ 1,\ 0)$，normalize 後水平分量約 0.16，和細波紋常見的 0.2 差不多大，卻完全沒有進到 offset。
+
+### 轉到 world space：Transform
+
+URP 打光時用的水面 normal，是把 $\mathbf{n}$ 用 $T$、$B$、$N$ 轉回 world 的結果 (同一節程式裡 `TransformTangentToWorld` 那行)，其中的 $N$ 就是大浪的 normal。在 graph 裡做同一個轉換，就拿到含大浪的 normal，記作 $\mathbf{n}_{\text{ws}}$：
+
+$$\mathbf{n}_{\text{ws}} = \operatorname{normalize}(n_x\,T + n_y\,B + n_z\,N)$$
+
+**Transform** node (Create Node > Math > Vector > Transform) 把一個向量從一個座標空間換到另一個：
+
+| 埠 | 型別 | 用途 |
+| --- | --- | --- |
+| In | Vector 3 | 要轉換的向量 |
+| Out | Vector 3 | 轉換後的向量 |
+
+node 上的 From、To 選座標空間，Type 選這個向量當成什麼轉。這裡選 From **Tangent**、To **World**、Type **Normal**：產生的程式就是上面那行 `TransformTangentToWorld`，輸出長度是 1。Type 的預設是 Position，Position 會多加上像素的位置，結果是錯的。
+
+平的水面上 $T = (1, 0, 0)$、$B = (0, 0, 1)$、$N = (0, 1, 0)$，代入得 $\mathbf{n}_{\text{ws}} \approx (n_x,\ n_z,\ n_y)$：world 的 $x$、$z$ 就是 $n_x$、$n_y$。所以 offset 改取 $\mathbf{n}_{\text{ws}}$ 的 $x$、$z$ (Swizzle 的 Mask 改成 **xz**)：沒有浪的地方和[第三步](#第三步：依細波紋-offset-sampling-的位置)一樣；浪的坡面上 $N$ 傾斜，$\mathbf{n}_{\text{ws}}$ 跟著傾斜，大浪的坡度就加進來了。沒有波紋也沒有浪時 $\mathbf{n}_{\text{ws}} = (0, 1, 0)$，$x$、$z$ 都是 0，不偏。
+
+[「在螢幕上近似」](#在螢幕上近似：把-normal-的-xy-加到-UV)說的方向限制照舊：world 的 $x$、$z$ 對應畫面上哪個方向，取決於攝影機朝向。
+
+### 遠處會扭得過頭
+
+只做 Transform 的話，遠處的水下會整片跟著浪晃，晃得比近處還誇張。原因有兩個：
+
+- 遠處淡出 $F$ 只乘在細波紋上 ($(n_x,\ n_y) = S\,F\,(m_x,\ m_y)$)，大浪的傾斜沒有淡出，遠處的 offset 不再趨近 0。
+- offset 是畫面的單位。遠處的東西在畫面上小，畫面上同樣一段 offset 對應的世界距離和 eye depth $d$ 成正比。
+
+垂直 FOV 60 度 (Camera 的預設)、16:9 的畫面上，eye depth $d$ 處的畫面寬是
+
+$$W = 2\,d\tan 30° \times \tfrac{16}{9} \approx 2.05\,d$$
+
+公尺。主浪坡面上 offset 是 $0.05 \times 0.16 = 0.008$ ($h \ge 1$)，換成世界距離 $0.008\,W$：
+
+- $d = 5$：$0.008 \times 2.05 \times 5 \approx 0.08$ 公尺
+- $d = 50$：$0.008 \times 2.05 \times 50 \approx 0.82$ 公尺
+
+[「為什麼水下的東西會晃」](#為什麼水下的東西會晃)的例子裡，真的折射在水深 1 公尺處移動約 14 公分，和距離無關；50 公尺處卻移了 82 公分，扭得過頭。
+
+### 除以水面後方的 depth
+
+因為 offset 換成世界距離要乘上 $W \approx 2.05\,d$，所以 offset 先除以 $d$，乘回來之後 $d$ 就消掉，同樣的傾斜在任何距離都偏移差不多的世界距離。被 offset 移動的是水面後方那個東西，所以 $d$ 用它的 eye depth $d_s$ ([第四步](#第四步：不要取到水面前方的東西)回顧過：UV 不接的那個 Scene Depth，Eye)：
+
+$$\mathbf{u}_1 = \mathbf{u}_0 + \mathbf{o}, \qquad \mathbf{o} = R \cdot \operatorname{saturate}(h) \cdot \frac{(n_{\text{ws},x},\ n_{\text{ws},z})}{d_s}$$
+
+| 符號 | 意思 |
+| --- | --- |
+| $(n_{\text{ws},x},\ n_{\text{ws},z})$ | $\mathbf{n}_{\text{ws}}$ 的 $x$、$z$：水面在世界的水平方向上傾斜多少，含大浪與細波紋 |
+| $d_s$ | 這個像素在水面後方那個東西的 eye depth，公尺 |
+| $R$ | `RefractionStrength`，預設改成 0.25 (下一節) |
+
+$\mathbf{u}_0$、$h$ 和[第三步](#第三步：依細波紋-offset-sampling-的位置)相同。換成 $d_s$ 處的世界距離是 $\mathbf{o}_x W \approx 2.05\,R \cdot \operatorname{saturate}(h) \cdot n_{\text{ws},x}$，式子裡沒有 $d$。
+
+不除水面自己的 $d_w$，是因為 $d_s = d_w + h \ge d_w$：攝影機貼近水面時 $d_w$ 很小，除下去 offset 會暴增；$d_s$ 至少多了水下那段 $h$，不會。例：$d_w = 0.5$、$h = 2$ 時，除 $d_w$ 是除以 0.5，除 $d_s$ 是除以 2.5，差 5 倍。而且 $\operatorname{saturate}(h) / d_s$ 不超過 1 ($h < 1$ 時是 $h / (d_w + h)$；$h \ge 1$ 時 $d_s \ge 1$)，所以 offset 最多是 $R$ 乘傾斜。
+
+代價是魚、石頭輪廓兩側的 $d_s$ 不同，offset 也不同。例：水面 5 公尺遠，魚在水面後方 0.5 公尺、旁邊的湖底在 2 公尺，$d_s$ 是 5.5 和 7，offset 差約兩成，輪廓兩側的扭動有一點落差。
+
+### 新的 RefractionStrength
+
+$R$ 的意思變了：原本 offset 直接是 $R$ 乘傾斜，現在還要除以幾公尺的 $d_s$，0.05 留著的話，5 公尺處的 offset 只剩原本的五分之一。挑一個參考距離 $d_{\text{ref}}$，讓那裡的 offset 和第三步一樣：
+
+$$\frac{R}{d_{\text{ref}}} = 0.05 \quad\Rightarrow\quad R = 0.05\,d_{\text{ref}}$$
+
+$d_{\text{ref}}$ 取 5 公尺：站在岸邊、貼近水面檢查半泡石頭和魚時，看的水下東西大約在幾公尺內，第三步調出來的晃動幅度在這個距離上保留下來。所以 $R = 0.25$，Slider 的範圍跟著放大五倍成 0 到 1。
+
+同樣 0.2 的傾斜、$h \ge 1$，兩種做法並排：
+
+- 第三步：$\mathbf{o} = 0.05 \times 0.2 = 0.01$，任何距離都一樣
+- 這一步：$\mathbf{o} = 0.25 \times 0.2 / d_s$：$d_s = 2.5$ 時 0.02，5 時 0.01，50 時 0.001
+
+在 2560 像素寬的畫面上，0.02、0.01、0.001 分別是橫向約 51、26、3 個像素。換成世界距離都是 $2.05 \times 0.25 \times 0.2 \approx 0.10$ 公尺，和真的折射的 14 公分同一個量級。
+
+### 和 Crest 的對照
+
+開源的 Crest 水體也是這兩件事：
+
+```hlsl crest/Assets/Crest/Crest/Shaders/OceanEmission.hlsl OceanEmission() (節錄)
+float2 refractOffset = _RefractionStrength * i_n_pixel.xz;
+…
+refractOffset *= min(1.0, 0.5 * (i_sceneZ - i_pixelZ)) / i_sceneZ;
+```
+
+- `i_n_pixel`：world space 的水面 normal。`Ocean.shader` 由大浪位移算出的傾斜，加上 normal map 的傾斜，再 normalize，相當於這裡的 $\mathbf{n}_{\text{ws}}$；取 `.xz` 和這一步一樣。
+- `min(1.0, 0.5 * (i_sceneZ - i_pixelZ))`：`i_pixelZ` 是水面的 eye depth、`i_sceneZ` 是這個像素的場景 depth，所以這是 $\operatorname{saturate}(h/2)$，對應這裡的 $\operatorname{saturate}(h)$。
+- `/ i_sceneZ`：除以 $d_s$，和這一步相同。
+
+HDRP 的水 (`ComputeWaterRefractionParams`) 也取 world normal 的水平分量，但直接在世界空間把水面的位置沿它移一段 (最多到水的厚度)，再投影回畫面取 UV；偏移本來就是公尺，不必除 depth，比較正確，但在 graph 裡要多接一段投影的 node。
+
+### 接線
+
+1. 改 Property
+
+   Blackboard 選 `RefractionStrength`：Slider 的 Max 改 **1**、Default Value 改 **0.25**。Material 上已經存的值不會跟著 Default Value 變，`M_LakeWater` 的 RefractionStrength 也改成 0.25。
+
+2. 接線
+
+   <ex-fig of="refraction-world-normal-offset-graph" caption="第六步的 graph。綠框是新加或改接的 node 與線" />
+
+   | node | 設定 | 輸入接什麼 | 算出 |
+   | --- | --- | --- | --- |
+   | Transform | From **Tangent**、To **World**、Type **Normal** | In ← Normal Strength (細波紋，接 Normal block 的那個) | $\mathbf{n}_{\text{ws}}$ |
+   | Swizzle ([第三步](#第三步：依細波紋-offset-sampling-的位置)的) | Mask：**xz** (原本 xy) | In ← Transform (取代 Normal Strength 的線) | $(n_{\text{ws},x},\ n_{\text{ws},z})$ |
+   | Divide | | A ← [第三步](#第三步：依細波紋-offset-sampling-的位置)算出 $\mathbf{o}$ 的 Multiply；B ← 原本算厚度的 Scene Depth (UV 不接的那個，$d_s$) | 新的 $\mathbf{o}$ |
+   | Add ([第三步](#第三步：依細波紋-offset-sampling-的位置)的) | | B ← Divide (取代 Multiply 的線) | $\mathbf{u}_1$ |
+
+   Normal Strength 的輸出現在接 Normal block 和 Transform。
+
+3. 按 Save Asset
+
+```hlsl 對照：第六步之後的 offset
+float3 nWS = TransformTangentToWorld(rippleNormal, tangentToWorld);   // Transform (Tangent → World, Normal)
+float2 o = nWS.xz * RefractionStrength * saturate(h) / ds;            // Swizzle (xz)、兩個 Multiply、Divide
+float2 uv1 = screenPos.xy + o;                                        // Add
+```
+
+### 現在應該看到
+
+- 大浪經過時，水下的東西跟著浪的坡面整片緩慢地來回偏移，細波紋的快速扭動疊在上面。
+- 5 公尺左右的水下晃動和上一步差不多；更近的晃得更明顯，遠處只剩跟著浪的輕微偏移。
+- 水邊線、石頭的接觸處照舊穩定；石頭後方沒有碎片，魚沒有亮邊。
+- Material 上的 RefractionStrength 改成 0：回到筆直；改成 1：晃得很厲害。看完改回 0.25。
+
+| 看到的現象 | 原因通常是 | 怎麼修 |
+| --- | --- | --- |
+| 浪經過時水下仍然不偏 | Swizzle 的 In 還接著 Normal Strength | In ← Transform |
+| 水下的影像整片往畫面的一個方向錯開 | Swizzle 的 Mask 還是 xy ($n_{\text{ws},y} \approx 1$，offset 變成固定的一大段) | 改成 xz |
+| 水下的影像完全錯亂，和波紋無關 | Transform 的 Type 是 Position (輸出多了像素的位置，好幾公尺大) | 改成 Normal |
+| 水下幾乎不扭曲 | RefractionStrength 還是 0.05 (除以幾公尺的 $d_s$ 之後很小) | Material 上改成 0.25 |
+| 水下碎成雜訊 | Divide 的 A、B 接反 ($d_s / \mathbf{o}$，$\mathbf{o}$ 接近 0 的地方非常大) | A ← Multiply、B ← Scene Depth (UV 不接的那個) |
+| 攝影機貼近水面時，腳邊的水下扭得非常厲害 | Divide 的 B 接成 Split 的 A ($d_w$) | B ← Scene Depth (UV 不接的那個) |
+
+到這裡，水下跟著細波紋與大浪扭曲，顏色也跟著扭曲後的輪廓走，shader 的部分完成了。但 RefractionStrength 只在 Material 上，而這套水的參數都由設定資產寫進 Material，所以下一步把它搬進設定資產。
+
+## 第七步：把新參數搬進設定資產
+
+### WaterSettings.cs：新增欄位
+
+和前幾章一樣，參數的來源是設定資產。在 Material 上調過的 RefractionStrength 先記下來，掛上新程式後會被蓋掉。
+
+完整檔案在 教材 GitHub repo 的 [`Assets/Water/Scripts/WaterSettings.cs`](https://github.com/RogelioKG/explain-waterbody/blob/main/urp-water/unity/Assets/Water/Scripts/WaterSettings.cs)。新增的部分 (`…` 是沒變的部分)：
+
+```csharp Assets/Water/Scripts/WaterSettings.cs 這一章新增的部分
+public float smoothness = 0.9f;         // 0 到 1，越大高光越小、越銳利
+public float refractionStrength = 0.25f; // 折射的強度：水下的畫面跟著水面的傾斜偏移多少，0 是不扭曲
+…
+public float Smoothness => Mathf.Clamp01(smoothness);
+public float RefractionStrength => Mathf.Max(refractionStrength, 0f);
+```
+
+負數會讓 offset 反向，沒有意義，在讀取時當成 0。類別開頭的註解也改成現在的內容。
+
+### WaterBody.cs：寫進 Material
+
+```csharp Assets/Water/Scripts/WaterBody.cs 這一章新增的部分
+static readonly int RefractionStrengthId = Shader.PropertyToID("_RefractionStrength");
+
+void WriteMaterial()
+{
+    …
+    material.SetFloat(SmoothnessId, settings.Smoothness);
+    material.SetFloat(RefractionStrengthId, settings.RefractionStrength);
+}
+```
+
+ID 的名字就是[第三步](#第三步：依細波紋-offset-sampling-的位置)建立的 Property 的 Reference。時間、bounds、陡度警告的部分沒有改。
+
+### 現在應該看到
+
+- `SO_LakeWater` 的 Inspector 在 Smoothness 下面多了 Refraction Strength，值是 0.25。
+- `M_LakeWater` Material 上的 RefractionStrength 和設定資產一致；直接改 Material，馬上被蓋回。
+- 在設定資產把它改成 0.75：水下晃得更厲害。看完改回。
+
+<ex-fig of="refraction-settings-inspector" caption="示意：SO_LakeWater 的 Inspector (只畫最後幾個欄位)" />
+
+| 看到的現象 | 原因通常是 | 怎麼修 |
+| --- | --- | --- |
+| 改設定資產沒反應 | graph Property 的 Reference 不是 `_RefractionStrength` | 對照 Reference |
+| 掛上新程式後水下不再扭曲 | 設定資產的新欄位是 0 | 填入 0.25 |
+| Console 紅字 `does not contain a definition for 'RefractionStrength'` | `WaterSettings.cs` 沒存檔，或名字打錯 | 對照完整檔案 |
+
+## 第八步：把這一章的 node 收成 Sub Graph
+
+### 收成兩個 Sub Graph
+
+折射的 node 做兩件事：算出 offset 後的位置 $\mathbf{u}_1$，再比較 depth 選出最後採用的位置 $\mathbf{u}$ 和那裡的 depth $d_{\mathbf{u}}$。各收成一個 Sub Graph，主 graph 上只剩讀取畫面、depth 的 node 與合成，之後的章節改合成時好找；水面不變。
+
+流程和 Depth Coloring 的[「第六步：把這一章的 node 收成 Sub Graph」](depth-coloring.html#第六步：把這一章的-node-收成-Sub-Graph)相同：選取下表的 node → 右鍵 Convert To Sub-graph → 存到 `Assets/Water/Shaders/SubGraphs/` → 照表改接口名 → Save Asset。先收 `SSG_Refraction_UV`，再收 `SSG_Refraction_Select`，後者轉換時接進來的就是前者的 RefractedUV。
+
+| Sub Graph | 要選的 node | Inputs | Outputs |
+| --- | --- | --- | --- |
+| `SSG_Refraction_UV` | [第三步](#第三步：依細波紋-offset-sampling-的位置)的 Swizzle、Saturate、兩個 Multiply、Add<br><br>[第六步](#第六步：讓大浪也偏折)的 Divide | ScreenPosition ← Screen Position (Default)<br><br>NormalWS ← Transform (Tangent → World)<br><br>Thickness ← 原本那個 `SSG_Thickness`<br><br>SceneDepth ← Scene Depth (UV 不接的那個)<br><br>Strength ← RefractionStrength | RefractedUV ($\mathbf{u}_1$) → `SSG_Refraction_Select` 的 RefractedUV、Scene Depth ($d_1$) 的 UV |
+| `SSG_Refraction_Select` | [第四步](#第四步：不要取到水面前方的東西)的 Comparison、Branch<br><br>[第五步](#第五步：顏色跟著扭曲後的背景走)的 Branch | ScreenPosition ← Screen Position (Default)<br><br>RefractedUV ← `SSG_Refraction_UV`<br><br>RefractedDepth ($d_1$) ← Scene Depth (UV 接 `SSG_Refraction_UV` 的那個)<br><br>SceneDepth ($d_s$) ← Scene Depth (UV 不接的那個)<br><br>SurfaceDepth ← Split 的 A | FinalUV ($\mathbf{u}$) → Scene Color 的 UV<br><br>FinalDepth ($d_{\mathbf{u}}$) → 新放的 `SSG_Thickness` 的 SceneDepth |
+
+<ex-fig of="refraction-uv-select-sub-graphs" caption="收成 Sub Graph 之後的 graph。綠框是這一步收成的兩個 Sub Graph 與接到它們的線，藍色是 Sub Graph node" />
+
+- **留在主 graph**：因為 Sub Graph 只做計算、讀外部狀態的 node 從輸入接進來 (看接口就知道它依賴什麼)，所以讀 opaque texture 的 Scene Color、讀 depth texture 的兩個 Scene Depth、Screen Position (Default) 不選；Transform 要用 mesh 在這個像素的 tangent frame，也不選，它的輸出變成 NormalWS 輸入；Scene Color 的 Out ($C_{\text{scene}}$) 照舊接[第一步](#第一步：自己取出水面後方的畫面)的 Multiply 的 A。Split 還接著 `SSG_Thickness`，也留在外面。接進來的線就變成輸入。
+- 新放的 `SSG_Thickness` 也不選：它本身已經是 Sub Graph，留在主 graph 和原本那個並排，看得出哪個厚度給 offset 與泡沫、哪個給透光率。
+- 收完之後，同一個 Split 的 A ($d_w$) 拉到三處：兩個 `SSG_Thickness` 的 SurfaceDepth，和 `SSG_Refraction_Select` 的 SurfaceDepth (原本接 Comparison 的那條線)。UV 不接的那個 Scene Depth ($d_s$) 也拉到三處：原本那個 `SSG_Thickness` 的 SceneDepth、`SSG_Refraction_Select` 的 SceneDepth，和 `SSG_Refraction_UV` 的 SceneDepth (原本接 Divide 的那條線)。
+- **同型別的輸入**：三個 depth 輸入都是 `Vector1`，自動名相同，看 Sub Graph 裡接到哪來認：接 Comparison 的 A 和[第五步](#第五步：顏色跟著扭曲後的背景走)的 Branch 的 False 的是 RefractedDepth，只接[第五步](#第五步：顏色跟著扭曲後的背景走)的 Branch 的 True 的是 SceneDepth，接 Comparison 的 B 的是 SurfaceDepth。兩個位置輸入也看接到哪：接[第四步](#第四步：不要取到水面前方的東西)的 Branch 的 True 的是 ScreenPosition，接 False 的是 RefractedUV。`SSG_Refraction_UV` 的三個 `Vector1` 輸入同樣看接到哪：接 Saturate 的是 Thickness，接 Divide 的 B 的是 SceneDepth，接 Multiply「$R \cdot \operatorname{saturate}(h)$」的 A 的是 Strength。
+
+### 現在應該看到
+
+- 水面和[第七步](#第七步：把新參數搬進設定資產)做完時一樣。`SG_Water` 裡折射的部分只剩兩個 Sub Graph node 和 Transform、Scene Color、兩個 Scene Depth，`Assets/Water/Shaders/SubGraphs/` 多了 `SSG_Refraction_UV`、`SSG_Refraction_Select`。
+
+## 回頭看
+
+### 接回開頭的問題
+
+開頭的問題是：水面在動，水下的東西卻是筆直的。一路修下來：
+
+| 步驟 | 修掉的問題 | 留下的東西 |
+| --- | --- | --- |
+| [第一步](#第一步：自己取出水面後方的畫面) | 水後方的畫面由 GPU 混色，shader 改不了位置 | Scene Color 讀 opaque texture，乘 $\tau$ 接 Emission |
+| [第二步](#第二步：換掉混色的方式) | 湖底的顏色被加了兩次 | Alpha = 1；背景 × 染色 × $(1 - f)$ 接 Emission，$\alpha\,C_{\text{deep}}$ 與泡沫接 Base Color |
+| [第三步](#第三步：依細波紋-offset-sampling-的位置) | 水下筆直 | screen position 加上 $R \cdot \operatorname{saturate}(h) \cdot (n_x, n_y)$ |
+| [第四步](#第四步：不要取到水面前方的東西) | 取到水面前方的石頭 | offset 後的 depth $d_1 < d_w$ 時退回 $\mathbf{u}_0$ |
+| [第五步](#第五步：顏色跟著扭曲後的背景走) | 顏色和扭曲後的輪廓對不上 | $\tau$ 改用最後採用的位置量的 $h_1$ (再放一個 `SSG_Thickness`) |
+| [第六步](#第六步：讓大浪也偏折) | 浪經過時水下不偏；遠處扭得過頭 | offset 改成 $R \cdot \operatorname{saturate}(h) \cdot (n_{\text{ws},x}, n_{\text{ws},z}) / d_s$ (Transform 轉到 world space)，$R$ 預設 0.25 |
+| [第七步](#第七步：把新參數搬進設定資產) | 參數只在 Material 上 | `refractionStrength` 放進 `WaterSettings`，由 `WaterBody` 寫進 Material |
+| [第八步](#第八步：把這一章的-node-收成-Sub-Graph) | 折射的 node 攤在主 graph 上 | `SSG_Refraction_UV` ($\mathbf{u}_1$)、`SSG_Refraction_Select` ($\mathbf{u}$、$d_{\mathbf{u}}$)；Transform、Scene Color、Scene Depth 與合成留在主 graph |
+
+### 檢查點：水下跟著波紋扭曲，其他效果不變
+
+做對時你會看到：
+
+- 從岸邊看湖：水下的石頭、魚的輪廓跟著細波紋晃動扭曲，大浪經過時整片跟著浪的坡面緩慢偏移；攝影機貼近水面時最明顯，遠處只有輕微偏移。
+- 水邊線和石頭接觸處穩定；半泡石頭後方緊貼輪廓的水裡，沒有石頭的碎片。
+- 魚的顏色跟著扭曲後的輪廓走，沒有亮邊。
+- Depth Coloring 的效果仍然成立：水邊線附近清澈見底，越往湖心越暗、越偏藍綠，湖心看不到底；淺水和岸上的地面接得起來，不比岸上亮。
+- 水邊線和半泡的石頭周圍有不透明的白色泡沫，緩慢漂移變形，不跟著扭曲晃動。
+- 水面下 0.5 公尺的魚清楚，1.5 公尺的魚淡淡的，3.5 公尺的魚幾乎看不見。
+- Flow Normals 的效果仍然成立：壓低攝影機面向太陽，倒影碎成閃動的小亮點，遠處平順。波浪照舊起伏。
+- 調效果用 Scene 視窗；最後用角色的攝影機在 Game 視窗確認一次。
+- 在 `SO_LakeWater` 改 Refraction Strength，扭曲的程度立刻跟著變；直接改 Material 會被蓋回。
+- `SG_Water` 的折射由 `SSG_Refraction_UV`、`SSG_Refraction_Select` 算出 $\mathbf{u}$ 與 $d_{\mathbf{u}}$，Transform 在主 graph 把細波紋的 normal 轉到 world space 接進 `SSG_Refraction_UV`，Scene Color、Scene Depth 在主 graph 讀取，兩個 `SSG_Thickness` 分別給 offset 與泡沫、給透光率。
+
+<ex-fig of="refraction-overall-check" caption="示意：從岸邊看湖。左：預期。其餘：最常見的三種錯誤" />
+
+| 看到的現象 | 原因通常是 | 回到哪一步 |
+| --- | --- | --- |
+| 看不到湖底的影像 | Opaque Texture 沒開，或 Emission 沒接 | [第一步](#第一步：自己取出水面後方的畫面)、[第二步](#第二步：換掉混色的方式) |
+| 淺水比岸上亮 | Alpha 不是 1 | [第二步](#第二步：換掉混色的方式) |
+| 泡沫是半透明的 | Emission 少乘 $1 - f$ | [第二步](#第二步：換掉混色的方式) |
+| 水下筆直 | Scene Color 的 UV 沒有加上 offset | [第三步](#第三步：依細波紋-offset-sampling-的位置) |
+| 水邊線在抖 | offset 沒有乘 $\operatorname{saturate}(h)$ | [第三步](#第三步：依細波紋-offset-sampling-的位置) |
+| 石頭後方的水裡有石頭的碎片 | 沒有 depth test (深度測試：比較遠近，被擋住的不畫) | [第四步](#第四步：不要取到水面前方的東西) |
+| 魚的一側有亮邊 | `SSG_Absorption` 的 Thickness 還接著原本那個 `SSG_Thickness` | [第五步](#第五步：顏色跟著扭曲後的背景走) |
+| 浪經過時水下不偏 | offset 還用 tangent space 的 normal (Swizzle 沒接 Transform) | [第六步](#第六步：讓大浪也偏折) |
+| 水下幾乎不扭曲 | RefractionStrength 還是 0.05 | [第六步](#第六步：讓大浪也偏折)、[第七步](#第七步：把新參數搬進設定資產) |
+| 改設定資產沒反應 | Reference 名稱不一致 | [第三步](#第三步：依細波紋-offset-sampling-的位置)、[第七步](#第七步：把新參數搬進設定資產) |
+| 收成 Sub Graph 之後水面變了 | 轉換時漏選或多選了 node | [第八步](#第八步：把這一章的-node-收成-Sub-Graph) |
+
+**對應 Final Demo**：「透過水面看水下物體會有折射扭曲」。這一章完成了這一條。前面完成的「水面 mesh 本身會上下起伏」、「近岸淺水偏透明、能看到水底，越深越暗、越偏藍綠色」、「岸邊與物體接觸處有白色泡沫」仍然成立。
+
+此時你的專案裡，以下檔案應該和教材 GitHub repo 的[範例程式碼](https://github.com/RogelioKG/explain-waterbody/tree/main/urp-water/unity)相同：
+
+- `Assets/Water/Scripts/WaterMesh.cs` (這一章沒有改它)
+- `Assets/Water/Scripts/WaterSettings.cs`
+- `Assets/Water/Scripts/WaterBody.cs`
+- `Assets/Water/Shaders/GerstnerWaves.hlsl` (這一章沒有改它)
+
+`SG_Water.shadergraph`、`Assets/Water/Shaders/SubGraphs/` 的 Sub Graph、`M_LakeWater` Material、`SO_LakeWater` 資產不在 repo 裡，以這一章的 node graph 與 node 表為準。
+
+### 下一步
+
+下一章 [Reflection](reflection.html) 讓水面在低角度時反射天空，俯視時較透明。
+
+### 請回報
+
+以下是官方文件沒有寫清楚、需要你在 Unity 裡看一眼的事：
+
+| # | 去哪裡看 | 回報什麼 |
+| --- | --- | --- |
+| 1 | [第一步](#第一步：自己取出水面後方的畫面)：URP Asset 的 Opaque Downsampling | 目前的值；[第二步](#第二步：換掉混色的方式)之後，透過水看到的湖底是否比岸上模糊 |
+| 2 | [第一步](#第一步：自己取出水面後方的畫面)的「淺水變亮」 | 最淺的水邊線處是否也變亮 (依原始碼推論是會；不會的話表示 Emission 有乘 Alpha) |
+| 3 | [第二步](#第二步：換掉混色的方式)之後：把角色的攝影機的 Camera Component Opaque Texture 暫時改成 Off，按 Play 在 Game 視窗看 | 水面變成什麼樣子 (官方沒有寫 Scene Color 這時回傳什麼)；看完改回 |
+| 4 | [第二步](#第二步：換掉混色的方式)之後：和上一章比較 | 深水是否看起來相同；中等深度的水色差多少 |
+| 5 | [第三步](#第三步：依細波紋-offset-sampling-的位置)：RefractionStrength 0.05 | 攝影機貼近水面時，晃動的幅度大約幾個像素；是否太大或太小 |
+| 6 | [第三步](#第三步：依細波紋-offset-sampling-的位置)：讓水下的東西出現在畫面最邊緣 | 邊緣有沒有看得出來的拉長 |
+| 7 | [第四步](#第四步：不要取到水面前方的東西)：看半泡石頭後方緊貼輪廓的水 | 改之前有沒有碎片；改之後是否消失 |
+| 8 | [第六步](#第六步：讓大浪也偏折)：RefractionStrength 0.25，看攝影機腳邊的水與 50 公尺外的水 | 腳邊的晃動是否太大；遠處是否還看得出跟著浪的偏移 |
+
+## 變化與延伸
+
+### 效能
+
+這一章的代價是 opaque texture：URP 每一幀要多複製一次整個畫面。開關有兩個：
+
+- **Opaque Downsampling** (URP Asset 的 Rendering 區塊)：None 是同解析度；2x Bilinear 是寬高各一半；4x Box、4x Bilinear 是寬高各四分之一，4x Box 會再柔和地模糊。解析度越低越省，透過水看到的東西也越糊。每個畫質等級可以有自己的 URP Asset，低畫質用 4x。
+- **Camera Component 的 Opaque Texture**：看不到水的攝影機 (例如只畫 UI 的) 設成 Off。畫水的攝影機不能關。
+
+RefractionStrength 改成 0 只是不扭曲，快照照樣會複製、Scene Color 照樣會取，不會變省。這些成本沒有量測過，以 Profiler 為準。
+
+## 來源
+
+### 官方文件與原始碼
+
+縮寫：`SG` = `https://docs.unity3d.com/Packages/com.unity.shadergraph@17.3/manual`，`M` = `https://docs.unity.com/en-us/engine/6000.3/manual`，`GFX` = GitHub `Unity-Technologies/Graphics` 的 `6000.3/staging` 分支 `Packages/com.unity.render-pipelines.universal/`。
+
+- Opaque Texture、Opaque Downsampling：`M/render-pipelines/universal-render-pipeline/urp-reference/universalrp-asset`；Camera 的覆寫：`M/cameras/urp/camera-components-reference/camera-component-reference`
+- 快照在畫完天空之後、畫 transparent 物體 之前複製，沒有水面自己：`GFX/Runtime/UniversalRendererRenderGraph.cs`；texture 的解析度、濾波與 Clamp：`GFX/Runtime/Passes/CopyColorPass.cs`
+- node：`SG/Scene-Color-Node.html`、`SG/Screen-Position-Node.html`、`SG/Scene-Depth-Node.html`、`SG/Comparison-Node.html`、`SG/Branch-Node.html`
+- Scene Color sampling 與畫面邊緣的處理 (`SampleSceneColor`、`ClampAndScaleUVForBilinear`)：`GFX/ShaderLibrary/DeclareOpaqueTexture.hlsl`
+- Emission 不打光、直接加到最後的顏色：`GFX/ShaderLibrary/Lighting.hlsl`；Preserve Specular Lighting 勾選時的混色方式：`GFX/Editor/ShaderGraph/Targets/UniversalTarget.cs`
+- 把 normal 的 xy 加到 screen position 當折射：官方 Production Ready Shaders 的水體範例 (`SG/Shader-Graph-Sample-Production-Ready-Water.html`)；在 offset 後的位置比較 depth 是這一章自己的做法，官方範例沒有
+- Transform node：`SG/Transform-Node.html`；Tangent → World 的產生碼 (Type Normal 是 `TransformTangentToWorld`、Position 會加上像素位置、輸出預設 normalize)：GitHub `Unity-Technologies/Graphics` 的 `Packages/com.unity.shadergraph/Editor/Data/Util/SpaceTransformUtil.cs`
+
+### 其他水體的做法
+
+- Crest 的折射 offset (`refractOffset`)：[`OceanEmission.hlsl`](https://github.com/wave-harmonic/crest/blob/master/crest/Assets/Crest/Crest/Shaders/OceanEmission.hlsl)；`i_n_pixel` 由大浪的傾斜加 normal map 組成：[`Ocean.shader`](https://github.com/wave-harmonic/crest/blob/master/crest/Assets/Crest/Crest/Shaders/Ocean.shader)
+- HDRP 的 `ComputeWaterRefractionParams`：[`WaterUtilities.hlsl`](https://github.com/Unity-Technologies/Graphics/blob/master/Packages/com.unity.render-pipelines.high-definition/Runtime/Water/Shaders/WaterUtilities.hlsl)
+</script>
+<script>
+explainer({
+  title: 'Refraction',
+  assumes: ['Unity 編輯器的基本操作 (看完 Unity Learn 的 Basic 與 Creative Core)', { t: 'Vector Math (Snell 定律)', href: 'vector-math.html' }, { t: 'Shader Basics (opaque texture 與 depth texture)', href: 'shader-basics.html' }, { t: 'Shader Graph', href: 'shader-graph.html' }, { t: 'Depth Coloring', href: 'depth-coloring.html' }, { t: 'Flow Normals (做完的湖)', href: 'flow-normals.html' }, { t: 'URP Waterbody (總覽)', href: 'urp-water.html' }],
+  approach: '重新發明：每一步先在 Unity 裡做出來，看到哪裡不對，再講下一段原理去修它',
+  env: 'Windows 11、Unity 6000.3.20f1 (英文介面)、URP 17.3、Shader Graph 17.3',
+  terms: {
+    'opaque texture': { def: '畫完 opaque 物體與天空、還沒畫 transparent 物體 (包括水) 時，URP 拍下的畫面快照', href: 'shader-basics.html' },
+    'Sub Graph': { def: '把一串 node 存成一個資產，在 graph 裡變成一個 node；Blackboard 的 Property 是它的輸入，Output node 收它的輸出', href: 'shader-graph.html' },
+  },
+});
+</script>
+</body>
+</html>

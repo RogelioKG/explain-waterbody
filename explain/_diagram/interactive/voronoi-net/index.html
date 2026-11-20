@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>每處歸給最近的點，邊界連成網</title>
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <header class="top">
+    <p class="concl">每處歸給<b class="t-pt">最近的點</b>，<b class="t-edge">邊界</b>連成網</p>
+  </header>
+
+  <main class="layout">
+    <section class="stage card" aria-label="Voronoi 畫面">
+      <div class="plot" id="plot">
+        <canvas id="cv" tabindex="0" aria-label="Voronoi 的亮度 I·δⁿ，灰階；藍點是撒的點，粉紅線是指到的位置到最近點的距離 δ；移動滑鼠或用方向鍵移動指到的位置"></canvas>
+        <span id="tag" class="tag" data-overlay>δ <output id="o-tag"></output></span>
+        <span class="scale" data-overlay>畫面寬 8 公尺</span>
+        <div class="badges" data-overlay><em id="bd-grid" class="badge" hidden>點排成方陣</em><em id="bd-n" class="badge" hidden>n = 1 看不出網</em></div>
+      </div>
+    </section>
+
+    <aside class="panel card" aria-label="參數">
+      <div class="toggles" role="group" aria-label="顯示">
+        <button id="b-pt" class="k-pt" type="button" aria-pressed="true"><i class="g-dot"></i>點</button>
+        <button id="b-edge" class="k-edge" type="button" aria-pressed="false"><i class="g-solid"></i>cell 邊界</button>
+        <button id="b-grid" class="k-edge" type="button" aria-pressed="false"><i class="g-dash"></i>格子</button>
+      </div>
+
+      <section class="grp" aria-label="撒點">
+        <div class="ctls">
+          <div class="ctl"><i class="dot k-edge"></i><label for="s-dens">CellDensity</label><output id="o-dens"></output></div>
+          <input id="s-dens" type="range" class="k-edge" min="0.2" max="3" step="0.1" value="0.7" />
+          <div class="ctl"><i class="dot k-pt"></i><label for="s-ao">AngleOffset</label><button id="b-play" class="play k-pt" type="button" aria-pressed="false" aria-label="讓 AngleOffset 隨時間變">▶</button><output id="o-ao"></output></div>
+          <input id="s-ao" type="range" class="k-pt" min="0" max="10" step="0.1" value="2" />
+          <p class="cap rd"><span id="r-pt" class="num t-pt"></span></p>
+        </div>
+        <figure class="inset">
+          <div class="mini"><canvas id="cv-cell" aria-label="一格裡點可能落的範圍與 400 格的點疊在一格的位置"></canvas></div>
+          <figcaption>一格裡的點</figcaption>
+        </figure>
+      </section>
+
+      <section class="grp" aria-label="亮度">
+        <div class="ctls">
+          <div class="ctl"><i class="dot k-n"></i><label for="s-n">次方 n</label><output id="o-n"></output></div>
+          <input id="s-n" type="range" class="k-n" min="1" max="8" step="0.5" value="3" />
+          <div class="ctl"><i class="dot"></i><label for="s-i">強度 I</label><output id="o-i"></output></div>
+          <input id="s-i" type="range" min="1" max="5" step="0.5" value="3" />
+          <p class="cap rd"><span class="t-d">δ <span id="r-d" class="num"></span></span> → 亮度 <span id="r-b" class="num"></span></p>
+        </div>
+        <figure class="inset">
+          <div class="mini"><canvas id="cv-curve" aria-label="亮度 I·δⁿ 對 δ 的曲線，灰底是畫面上各 δ 的面積，粉紅線是指到處的 δ"></canvas></div>
+          <figcaption>亮度 = I·<span class="t-d">δ</span><span class="t-n">ⁿ</span></figcaption>
+        </figure>
+      </section>
+    </aside>
+  </main>
+
+  <script src="./script.js"></script>
+</body>
+</html>

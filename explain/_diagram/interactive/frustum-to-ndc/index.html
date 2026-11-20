@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>frustum → NDC → 螢幕</title>
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <header class="head">
+    <h1>frustum → NDC → 螢幕</h1>
+    <p class="concl">長方形壓成正方，再拉回原樣</p>
+  </header>
+
+  <div class="main">
+    <main class="hero card">
+      <p id="step" class="step" aria-live="polite"></p>
+      <div id="view" class="view">
+        <canvas id="gl" aria-label="3D 圖：攝影機的 frustum 變形成 NDC 盒子，再攤平成螢幕"></canvas>
+        <div id="labels" class="labels" aria-hidden="true">
+          <span class="lab" id="l-cam" data-overlay>攝影機</span>
+          <span class="lab" id="l-f" data-overlay>FOV/2</span>
+          <span class="lab" id="l-d" data-overlay>距離 1 處的截面</span>
+          <span class="lab" id="l-h" data-overlay></span>
+          <span class="lab" id="l-w" data-overlay></span>
+          <span class="lab" id="l-z" data-overlay>depth：近 1 → 遠 0</span>
+          <span class="lab k-obj" id="l-o" data-overlay></span>
+        </div>
+        <p id="nogl" class="nogl cap" hidden>3D 需連網載入</p>
+        <div class="viewctl" data-overlay>
+          <button id="reset" type="button" hidden>重設視角</button>
+        </div>
+      </div>
+      <div class="track">
+        <input id="t" type="range" min="0" max="2" step="0.01" value="0" aria-label="階段：frustum、NDC、螢幕" />
+        <div class="ticks" aria-hidden="true"><span class="k-fr">frustum</span><span class="k-ndc">NDC</span><span class="k-px">螢幕</span></div>
+      </div>
+    </main>
+
+    <section class="strip card" aria-label="三個階段的正面，畫成同一個高度來比寬度">
+      <p class="strip-h cap">正面看，畫成一樣高</p>
+      <div class="stages">
+        <button class="stg k-fr" type="button" data-t="0">
+          <span class="pic"><svg id="s0" aria-label="frustum 在距離 1 處的截面與圓"></svg></span>
+          <span class="nm">截面 (距離 1)</span>
+          <span class="dim num" id="d0"></span>
+        </button>
+        <div class="arr">
+          <span class="a-line"></span>
+          <span class="a-txt" id="a1"><svg class="ico" viewBox="0 0 24 10" aria-hidden="true"><path d="M1 5H9M6 2L9 5L6 8M23 5H15M18 2L15 5L18 8" /></svg><b class="num" id="a1n"></b></span>
+        </div>
+        <button class="stg k-ndc" type="button" data-t="1">
+          <span class="pic"><svg id="s1" aria-label="NDC 正方形與圓變成的橢圓"></svg></span>
+          <span class="nm">NDC</span>
+          <span class="dim num" id="d1"></span>
+        </button>
+        <div class="arr">
+          <span class="a-line"></span>
+          <span class="a-txt" id="a2"><svg class="ico" viewBox="0 0 24 10" aria-hidden="true"><path d="M9 5H1M4 2L1 5L4 8M15 5H23M20 2L23 5L20 8" /></svg><b class="num" id="a2n"></b></span>
+        </div>
+        <button class="stg k-px" type="button" data-t="2">
+          <span class="pic"><svg id="s2" aria-label="螢幕像素與圓"></svg></span>
+          <span class="nm">螢幕</span>
+          <span class="dim num" id="d2"></span>
+        </button>
+      </div>
+    </section>
+  </div>
+
+  <section class="params" aria-label="參數">
+    <div class="ctl">
+      <span class="ctl-n"><i class="dot k-px"></i>螢幕</span>
+      <div class="seg" role="group" aria-label="螢幕長寬比">
+        <button type="button" data-res="2:1" aria-pressed="false">2:1</button>
+        <button type="button" data-res="16:9" aria-pressed="true">16:9</button>
+        <button type="button" data-res="4:3" aria-pressed="false">4:3</button>
+        <button type="button" data-res="1:1" aria-pressed="false">1:1</button>
+      </div>
+      <output id="o-a"></output>
+    </div>
+    <div class="ctl ctl-fov">
+      <label class="ctl-n" for="fov"><i class="dot k-fr"></i>FOV</label>
+      <input id="fov" class="k-fr" type="range" min="40" max="90" step="1" value="60" />
+      <output id="o-fov" for="fov"></output>
+    </div>
+  </section>
+
+  <script src="https://cdn.jsdelivr.net/npm/three@0.147.0/build/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.147.0/examples/js/lines/LineSegmentsGeometry.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.147.0/examples/js/lines/LineMaterial.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.147.0/examples/js/lines/LineSegments2.js"></script>
+  <script src="./script.js"></script>
+</body>
+</html>

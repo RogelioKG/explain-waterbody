@@ -1,0 +1,1091 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fishing Bobber</title>
+<script src="../_explainer/explainer.js"></script>
+</head>
+<body>
+<script type="text/markdown" id="ex-content">
+## 這一章要解決的問題
+
+### 方塊浮得起來，浮標還不會釣魚
+
+做完 [Buoyancy](buoyancy.html)，掛上 `Buoyancy` 的方塊會浮在湖上，跟著浪起伏、傾斜。但釣魚要的是另一種東西：細長的浮標要直立漂著，要能從岸邊拋出去、收回來，魚來的時候要被輕點幾下、再被拉進水裡，竿尖和浮標之間還要有一條線。
+
+這一章對應 Final Demo「互動與物理」的兩條：
+
+> 浮標會跟著波浪上下起伏、左右傾斜
+>
+> 魚咬鉤時浮標下沉
+
+做完後：細長、重心偏下的浮標直立漂著，浪經過時微微歪一下；按 F 把浮標拋進湖裡，按住 R 收線拉回；浮標在水裡等一會兒，會被輕點幾下，接著被拉沉，沒收線魚就跑掉；釣線從竿尖連到浮標，平常微微下垂，收線和魚在拉時拉直。這些寫成一個元件 `FishingRod`，掛在竿尖上；浮標本身沿用 `Buoyancy`，一行都不改。
+
+這一章不講：魚的 AI 與模型 (咬鉤只是時間到了就發生的事件)、釣到之後的小遊戲與 UI、釣竿彎曲、物理模擬的繩子 (用關節或一串質點)、浮標入水的漣漪與水花 ([Interactive Ripples](interactive-ripples.html))。
+
+### 這一章怎麼走
+
+| 步驟 | 做什麼 | 接下來要處理的 |
+| --- | --- | --- |
+| [第一步](#第一步：把方塊換成浮標) | 把方塊換成細長的浮標 | 不會躺平，但站不穩：斜了要很久才轉回直立 |
+| [第二步](#第二步：壓低重心) | 把重心壓低 | 浮標只能用手擺進水裡 |
+| [第三步](#第三步：拋竿與收線) | 拋竿與收線 | 浮標在水裡一直漂著，什麼事都沒發生 |
+| [第四步](#第四步：咬鉤) | 用狀態流程模擬咬鉤 | 看不到線，浮標像自己在動 |
+| [第五步](#第五步：釣線) | 釣線：先畫直線，再讓它下垂 | |
+
+每一步之後都有「現在應該看到」和對照表。示意圖都是從側面看浮標。
+
+## 第一步：把方塊換成浮標
+
+### 細長的浮標，掛上同一個 Buoyancy
+
+**`Buoyancy` 不管物體長什麼樣子，只看浮點、柱高與幾個數字。所以這一步不寫程式，做一根細長的浮標，掛上 Rigidbody 和 `Buoyancy`，只把 Column Height 改成浮標的高度，看它浮起來的樣子。**
+
+浮標用內建的 Capsule (預設高 2 公尺、直徑 1 公尺) 縮成高 0.5 公尺、直徑 0.1 公尺。真的浮標小得多，這裡放大是為了從岸邊看得清楚。
+
+回想一下 `Buoyancy` 的四個欄位：[[浮點]]的位置 Points (物體自己的座標，跟著 Scale 縮放)、柱高 Column Height、全部泡進水裡時浮力是重量的幾倍 Buoyancy Ratio $\beta$ (靜止時泡進水裡 $1/\beta$)、水的阻力 Water Drag $b$。
+
+### 準備浮標
+
+流程和 [Buoyancy](buoyancy.html#準備方塊) 準備方塊時相同：建立物件 → Add Component 加上 Rigidbody 與 `Buoyancy` → 照表設定。這次不同的地方：
+
+| 對象 | 設定 | 值 |
+| --- | --- | --- |
+| GameObject > 3D Object > **Capsule** | 名稱 | `Bobber` |
+| | Scale | (0.1, 0.25, 0.1)：高 0.5 公尺、直徑 0.1 公尺 |
+| | 位置 | 湖中央水深的地方，底面離水面約 0.25 公尺 |
+| Rigidbody | 全部 | 預設 (Mass 1) |
+| Buoyancy | Column Height | 0.5 (浮標的高度) |
+| | Points、Buoyancy Ratio、Water Drag | 預設 (四個點、2、8) |
+
+預設的四個點是 $(\pm 0.5,\ 0,\ \pm 0.5)$，跟著 Scale 縮成離浮標的軸 $\pm 0.05$ 公尺，在浮標半高處的外緣。想讓浮標顯眼一點，可以在 `Assets/LakeDemo/Materials/` 建一個紅色的 URP Lit 材質 `M_Bobber` 指派給它。
+
+第 13 章的方塊留著或刪掉都可以，它不影響浮標。`SO_LakeWater` 的 Height Scale 先在停止 Play 時改成 0。
+
+### 現在應該看到
+
+- 按 Play：浮標落水，晃一下，停在半泡在水裡的高度 (頂端露出水面 0.25 公尺)，直立。
+- 停止 Play，把浮標的 Rotation Z 改成 30、抬高到中心離水面約 0.5 公尺，再按 Play：浮標斜著落水，**不會躺平**；落水後 1 秒左右轉回直立，卻轉過頭，往另一邊擺到 18 度左右；之後左右來回擺，每趟約 3 秒，一次比一次小，約 9 秒後才停在直立 (2 度以內)。
+- 停止 Play，Rotation Z 改回 0、Height Scale 改回 1，再按 Play：浮標跟著浪慢慢搖，平均斜 10 度左右，最多斜到 25 度上下，像一根插在水裡的竹竿。
+
+| 看到的現象 | 原因通常是 | 怎麼修 |
+| --- | --- | --- |
+| 浮標穿過水面沉到湖底 | 浮標不在任何一片水面的範圍內，或沒掛上 `Buoyancy` | 把浮標移到湖的範圍內；檢查元件 |
+| 浮標浮在水面上方，幾乎沒泡進水裡 | Buoyancy Ratio 填得太大 | 改回 2 |
+| 浮標一落水就停在斜的角度，不再轉 | Points 被改成同一個點或不對稱 | 改回預設的四個點 |
+
+### 為什麼轉回直立這麼慢
+
+到這裡，浮標浮得起來，也不會躺平，但它轉回直立的力道很弱。因為 `Buoyancy` 的浮力加在半高處的四個浮點上，正好和 Unity 自動算出的[[重心]] (均勻的 Capsule 在正中央) 同高，重力加在重心上不會讓浮標轉，所以能讓它轉回直立的，只剩「低的那一側泡得深、推得大」這一點差別。
+
+這一點差別有多大，拿方塊和浮標各斜 30 度、中心在水面時算一次 (各側有兩個浮點，每個浮點分到 $1/4$，所以一側的推力是 $\beta \times \tfrac{1}{2} \times f_{\text{sub}} = f_{\text{sub}}$ 倍重量；$f_{\text{sub}}$ 是第 13 章那根柱子泡進水裡的比例)：
+
+<ex-fig of="bobber-thin-vs-wide-righting" caption="示意：同樣斜 30 度、中心在水面。兩張圖的比例尺相同，箭頭長度和推力成正比" />
+
+| | 浮點離軸 | 兩側各升降 | 兩側的 $f_{\text{sub}}$ | 推力差 | 一側到中心 (水平) | 轉正的 [[torque]] |
+| --- | --- | --- | --- | --- | --- | --- |
+| 方塊 (柱高 1 m) | 0.5 m | $0.5 \sin 30^\circ = 0.25$ m | $0.5 \pm 0.25/1$ = 0.75、0.25 | 0.5 倍重量 | $0.5 \cos 30^\circ \approx 0.43$ m | $0.5 \times 9.81 \times 0.43 \approx 2.1$ N·m |
+| 浮標 (柱高 0.5 m) | 0.05 m | $0.05 \sin 30^\circ = 0.025$ m | $0.5 \pm 0.025/0.5$ = 0.55、0.45 | 0.1 倍重量 | $0.05 \cos 30^\circ \approx 0.043$ m | $0.1 \times 9.81 \times 0.043 \approx 0.042$ N·m |
+
+因為推力差和一側到中心的距離都和浮點離軸的距離成正比，所以 torque 和這個距離的平方成正比：浮標細 10 倍，torque 小約 100 倍；柱高只有一半讓 $f_{\text{sub}}$ 的變化加倍，扳回 2 倍，最後小約 50 倍。浮標比方塊好轉 (同樣的 torque，轉得比方塊快約 8 倍)，抵不過 torque 小這麼多。
+
+而且讓它停下來的阻力也一樣弱：浮標轉動時，浮點離軸只有 5 公分，`GetPointVelocity` 量到的速度很小，阻力也很小，所以浮標轉過頭後要來回擺好幾趟才停。
+
+簡化：真實世界裡，沒有配重的細木棍會躺平：浮力作用在泡在水裡那一段的中心，比木棍的重心低，一斜就往下翻。`Buoyancy` 把浮力加在浮點上 (半高處)，所以這裡的浮標不會躺平，只是站不穩。兩種情形的解法相同，就是下一步。
+
+因為轉正的力道和浮點離軸距離的平方成正比，浮點又不能往外放 (浮標就這麼細，力要加在物體的表面附近)，所以要找一個和寬度無關的轉正力：讓重力也幫忙，把重心壓到浮點下方。
+
+## 第二步：壓低重心
+
+### 讓重力也幫忙轉回直立
+
+**把重心壓到浮點下方：浮標一斜，加在浮點高度往上的浮力和加在重心往下的重力就左右錯開，合起來把浮標轉回直立；錯開的距離取決於重心多低，和浮標多細無關。**
+
+<ex-fig of="bobber-low-com-righting-couple" caption="示意：浮標斜 30 度。左邊只剩上一步那一點兩側深淺差 (圖上省略)；右邊的重力和浮力錯開 0.05 m" />
+
+設重心在浮點下方 $h_{\text{com}}$，浮標斜 $\theta_{\text{tilt}}$。浮力的合力大約等於重量 $m_{\text{bob}} g$ ($m_{\text{bob}}$ 是浮標的質量)，和重力水平錯開 $h_{\text{com}} \sin\theta_{\text{tilt}}$，所以轉正的 torque 是
+
+$$\tau_{\text{com}} = m_{\text{bob}}\,g\,h_{\text{com}} \sin\theta_{\text{tilt}}$$
+
+代 $h_{\text{com}} = 0.1$ 公尺、斜 30 度：$1 \times 9.81 \times 0.1 \times 0.5 \approx 0.49$ N·m，是上一步 0.042 N·m 的十倍以上。
+
+真的浮標也是這樣做的：底部加了配重。
+
+重心只影響轉，不影響浮在多高：浮力和重力的大小都沒變，所以浮標照樣停在半泡在水裡的高度。
+
+### Rigidbody 的重心：Center Of Mass
+
+Rigidbody 預設勾選 **Automatic Center Of Mass**：Unity 依 Collider 的形狀算出重心，Capsule 的重心就在正中央。取消勾選，下面會出現 **Center Of Mass** 的 X、Y、Z，可以自己填。
+
+這個位置用物體自己的座標，跟著物體的位置與旋轉，但**不跟著 Scale** (官方文件特別註明)。所以填的是公尺：(0, −0.1, 0) 就是中心往下 0.1 公尺，不必換算 Scale。這點和 `Buoyancy` 的 Points 相反，Points 會跟著 Scale 縮放。
+
+程式裡對應的是 `Rigidbody.centerOfMass` (`Vector3`，同樣的座標)，這一章在 Inspector 設定就好，不必寫程式。
+
+選取浮標，Rigidbody 取消勾選 Automatic Center Of Mass，Center Of Mass 填 (0, −0.1, 0)。
+
+### 現在應該看到
+
+- Height Scale 0，Rotation Z 30、中心離水面約 0.5 公尺放下：浮標斜著落水，1 秒時還斜約 9 度，約 3 秒後轉回直立。停止 Play，Rotation Z 改回 0。
+- Height Scale 1：浮標幾乎一直直立，浪經過時微微歪一下，最多約 5 度。
+- 浮在水裡的高度和上一步一樣：頂端露出約 0.25 公尺。
+
+| 看到的現象 | 原因通常是 | 怎麼修 |
+| --- | --- | --- |
+| 和上一步一樣晃很久 | Automatic Center Of Mass 還勾著，填的值沒有作用 | 取消勾選 |
+| 浮標上下顛倒地浮著 | Center Of Mass 的 Y 填成正的 (+0.1)，重心跑到浮點上方 | 改成 −0.1 |
+| 改了 Center Of Mass，Play 後又變回去 | 在 Play 中改的，停止後自動還原 | 停止 Play 再改 |
+
+### 重心越低，越直、越不跟浪歪
+
+因為浪的斜坡讓浮標歪的只有上一步那一點兩側深淺差 (約 0.04 N·m)，所以重心壓得越低、$\tau_{\text{com}}$ 越大，浮標轉回直立越快，但也越不跟浪歪。同樣斜 30 度落水，換幾個 Center Of Mass 的 Y：
+
+| Center Of Mass Y | 斜 30 度落水，轉回直立要多久 | 有浪時平均斜幾度 | 有浪時最多斜幾度 |
+| --- | --- | --- | --- |
+| 0 (自動) | 9.5 秒 | 10.5 | 26 |
+| −0.05 | 7 秒 | 3.6 | 10.5 |
+| −0.1 | 3 秒 | 1.3 | 5.4 |
+| −0.15 | 1.6 秒 | 0.8 | 4.5 |
+
+「轉回直立」是之後一直在 2 度以內；「有浪」是 Height Scale 1 漂 60 秒。預設用 −0.1：3 秒內轉回直立，浪來時還看得出微微歪。想讓浮標多跟著浪搖，改成 −0.05；想要它幾乎不動，改成 −0.15。
+
+到這裡，浮標漂得像浮標了，但只能在 Scene 裡把它擺進水裡。釣魚要從岸邊把它拋出去、再收回來，下一步做竿尖。
+
+## 第三步：拋竿與收線
+
+### 從竿尖丟出去，沿著線拉回來
+
+**拋竿與收線交給一個新的元件 `FishingRod`，掛在竿尖上。浮標先掛在竿尖，不受物理控制，跟著角色走；按下 F，把浮標交給物理，給它一個往前上方的速度，飛出去落水後就交給 `Buoyancy`；按住 R，每一步物理都把浮標往竿尖的方向拉，拉到岸邊再掛回竿尖。**
+
+下面依序展開：竿尖放在哪；怎麼讀鍵盤；浮標怎麼掛在竿尖；怎麼拋出去；怎麼拉回來；最後是程式。
+
+### 竿尖
+
+竿尖是一個空的 GameObject `RodTip`，放在你的角色底下 (角色的根物件，不是骨架裡的骨頭)，所以角色走到哪，竿尖跟到哪。它必須滿足：
+
+- 在角色前方、離角色腳底約 2 公尺高的地方，例如 Position (0.4, 2, 0.8)。浮標會直立掛在它下方 0.5 公尺，不能碰到角色自己的 Collider。
+- 藍色的 Z 軸朝角色前方 (Rotation 用 (0, 0, 0) 通常就是)。浮標往這個方向拋。
+
+想看到竿子，可以自己放一根細長的 Cylinder 從角色手邊斜到竿尖，這一章不需要它。
+
+岸在 Y = 1，竿尖約 Y = 3，比水面高 3 公尺。後面的數字都照這個高度算。
+
+### 讀鍵盤：Input System
+
+用 Universal 3D 範本建的專案，預設用 [[Input System]] 套件 (Unity 6 的預設輸入方式；舊的 `Input` 類別屬於官方標為 deprecated 的 Input Manager) 讀輸入。直接讀鍵盤只要三樣東西：
+
+```csharp Keyboard
+public static Keyboard current { get; }    // 目前的鍵盤；沒有鍵盤時是 null
+public KeyControl this[Key key] { get; }   // 依按鍵代號取出那個鍵
+```
+
+| 成員 | 型別 | 用途 |
+| --- | --- | --- |
+| `Keyboard.current` | `Keyboard` | 目前的鍵盤，沒有鍵盤時是 `null`，所以用之前先檢查 |
+| `keyboard[Key.F]` | `KeyControl` | F 這個鍵；`Key` 是按鍵代號的列舉 |
+| `wasPressedThisFrame` | `bool` | 這一格畫面剛按下：只有按下的那一格是 true |
+| `isPressed` | `bool` | 現在是不是按著 |
+
+`wasPressedThisFrame` 以畫面的格為單位，物理一步不一定剛好對上一格，所以「按一下」要在 `Update` 讀；`isPressed` 是當下的狀態，在 `FixedUpdate` 讀也可以，所以「按住」在加力的 `FixedUpdate` 裡直接讀。按鍵開成 `Key` 型別的欄位，Inspector 會顯示成下拉選單，和角色的按鍵衝突時自己換。
+
+`Assets/Water/` 有自己的 Assembly Definition，只能用引用清單裡的程式集，所以先把 Input System 加進去：
+
+1. 選取 `Assets/Water/Water.asmdef`
+2. Inspector 的 **Assembly Definition References** 按 **+**，選 `Unity.InputSystem`
+3. 按 **Apply**
+
+Inspector 存檔時可能把引用寫成 `GUID:` 開頭的一串字，和直接寫名稱的版本等價。
+
+### 浮標掛在竿尖：Is Kinematic
+
+Rigidbody 的 **Is Kinematic** (程式裡是 `isKinematic`) 打開時，力和碰撞都推不動它，只能由程式改 `Transform` 來移動。浮標掛在竿尖時打開它：`Buoyancy` 加的力不再有作用，浮標完全照程式擺放；拋出去的那一刻關掉，交回給物理。
+
+掛在竿尖的位置：浮標直立 (`Quaternion.identity`，不旋轉)，頂端對齊竿尖。頂端在浮標自己的座標是 $(0,\ 1,\ 0)$ (Capsule 高 2，頂端在 +1)，換成 world 的位移要乘上 Scale 與旋轉，用 `Transform.TransformVector`：它和 [Buoyancy](buoyancy.html) 用過的 `TransformPoint` 一樣把物體自己的座標換成 world，但只換方向與長度，不加上物體的位置，適合換算「從中心到頂端」這種位移。$(0,\ 1,\ 0)$ 乘上 Scale 的 0.25，是往上 0.25 公尺，所以浮標的中心放在竿尖下方 0.25 公尺。
+
+這件事放在 `LateUpdate` 做：Unity 每一格先跑所有的 `Update` 和角色的動畫，最後才呼叫 `LateUpdate`。角色在這一格移動完、竿尖到了新位置之後才擺浮標，浮標就不會慢一格跟在後面。
+
+### 拋出去：直接設定速度
+
+拋竿的那一刻，關掉 Is Kinematic，直接把浮標的速度設成拋出去的速度。第 13 章只讀過 `linearVelocity`，它也可以寫：官方文件建議平常用 `AddForce`，像跳躍這種「速度要在一瞬間改變」的情形才直接設定，拋竿正是這種情形。同時把轉動的速度 `angularVelocity` 設成 0，浮標直直地飛出去。
+
+方向是竿尖面對的水平方向，往上抬 $\alpha_{\text{cast}}$ 度 (Cast Angle)；速度 $v_{\text{cast}}$ (Cast Speed)：
+
+$$\mathbf{v}_0 = v_{\text{cast}}\left(\cos\alpha_{\text{cast}}\ \hat{\mathbf{f}} + \sin\alpha_{\text{cast}}\ \hat{\mathbf{y}}\right)$$
+
+- $\hat{\mathbf{f}}$：竿尖的 Z 軸 (`transform.forward`) 把 Y 設成 0 再變成長度 1，只留水平方向；竿尖朝下或朝上一點，都還是往前拋。
+- $\hat{\mathbf{y}}$：正上方。
+
+例：$v_{\text{cast}} = 8$ 公尺 / 秒、$\alpha_{\text{cast}} = 30^\circ$：往前 $8 \cos 30^\circ \approx 6.9$ 公尺 / 秒，往上 $8 \sin 30^\circ = 4$ 公尺 / 秒。浮標的中心從水面上 2.75 公尺出發 (竿尖高 3 公尺，中心在竿尖下 0.25 公尺)，中心的高度是 $y(t) = 2.75 + 4t - \tfrac{1}{2} \times 9.81\,t^2$，$y = 0$ 時 $t \approx 1.26$ 秒，落在前方 $6.9 \times 1.26 \approx 8.7$ 公尺的水面。拋遠一點就加大 Cast Speed。
+
+### 收線：速度不夠才拉
+
+收線時，每一步物理都沿著「浮標頂端 → 竿尖」的方向拉浮標。拉多大，看浮標往竿尖的速度還差收線速度多少：
+
+$$F_{\text{reel}} = m_{\text{bob}}\,k_{\text{reel}}\,\max\!\left(0,\ v_{\text{reel}} - v_{\text{along}}\right)$$
+
+- $v_{\text{reel}}$：收線的速度 (Reel Speed，預設 2 公尺 / 秒)。
+- $v_{\text{along}}$：浮標的速度在往竿尖方向的分量，`Vector3.Dot(linearVelocity, 方向)`。
+- $k_{\text{reel}}$：差 1 公尺 / 秒時給多大的加速度 (Reel Strength，預設 10，單位 1 / 秒)，越大越快追上收線速度。
+- $\max(0,\ \cdot)$：浮標已經比收線速度快時不拉。線只能拉、不能推。
+
+為什麼不用固定大小的力：浮標被拉近岸邊時，線越來越陡，浮標被往上提、泡進水裡的部分變少，水的阻力跟著變小，固定的力會讓它越拉越快。例如固定給 10 公尺 / 秒² 的加速度，浮標會被拉到快 5 公尺 / 秒，還被拉翻過去；照上面的式子，浮標穩穩地以約 1.7 公尺 / 秒滑回來。
+
+力加在浮標的原點 (浮點所在的半高處)，用 `AddForceAtPosition`。水的阻力也加在這個高度，拉力和阻力大致抵消，浮標只會往竿尖那邊斜一點。加在頂端的話，拉力在上、阻力在下，浮標會被拉得翻過去。
+
+拉到離竿尖水平 1 公尺以內 (Reel Done Distance)，就把浮標掛回竿尖。這裡比水平距離，因為竿尖比水面高 3 公尺，浮標在水上，和竿尖的距離永遠不會小於這個高度。
+
+### FishingRod.cs：第一版
+
+在 `Assets/Water/Scripts/` 建立 `FishingRod.cs`：
+
+```csharp Assets/Water/Scripts/FishingRod.cs FishingRod (第三步的版本)
+using UnityEngine;
+using UnityEngine.InputSystem;
+
+namespace Water
+{
+    public class FishingRod : MonoBehaviour
+    {
+        enum State { Idle, Out }
+
+        [SerializeField] Rigidbody bobber;                              // 掛著 Buoyancy 的浮標
+        [SerializeField] Vector3 bobberTop = new Vector3(0f, 1f, 0f);   // 浮標頂端 (綁線的地方)，浮標自己的座標
+
+        [Header("Input")]
+        [SerializeField] Key castKey = Key.F;     // 按一下拋竿
+        [SerializeField] Key reelKey = Key.R;     // 按住收線
+
+        [Header("Cast and Reel")]
+        [SerializeField] float castSpeed = 8f;          // 拋出去的速度，公尺 / 秒
+        [SerializeField] float castAngle = 30f;         // 拋出去的方向往上抬幾度
+        [SerializeField] float reelSpeed = 2f;          // 收線的速度，公尺 / 秒
+        [SerializeField] float reelStrength = 10f;      // 1 / 秒；越大越快追上收線的速度
+        [SerializeField] float reelDoneDistance = 1f;   // 拉到離竿尖水平多近就收回竿尖，公尺
+
+        State state;
+
+        void Start()
+        {
+            ReturnToTip();
+        }
+
+        void Update()
+        {
+            Keyboard keyboard = Keyboard.current;
+            if (keyboard == null)
+            {
+                return;
+            }
+            if (state == State.Idle && keyboard[castKey].wasPressedThisFrame)
+            {
+                Cast();
+            }
+        }
+
+        void FixedUpdate()
+        {
+            if (state == State.Idle)
+            {
+                return;
+            }
+            Keyboard keyboard = Keyboard.current;
+            if (keyboard != null && keyboard[reelKey].isPressed)
+            {
+                Reel();
+            }
+        }
+
+        void LateUpdate()
+        {
+            if (state == State.Idle)
+            {
+                HoldAtTip();
+            }
+        }
+
+        void Cast()
+        {
+            HoldAtTip();
+            bobber.isKinematic = false;
+            Vector3 flat = transform.forward;
+            flat.y = 0f;
+            flat.Normalize();
+            float angle = castAngle * Mathf.Deg2Rad;
+            bobber.linearVelocity = (flat * Mathf.Cos(angle) + Vector3.up * Mathf.Sin(angle)) * castSpeed;
+            bobber.angularVelocity = Vector3.zero;
+            state = State.Out;
+        }
+
+        void Reel()
+        {
+            Vector3 toTip = transform.position - bobber.transform.TransformPoint(bobberTop);
+            Vector3 flat = new Vector3(toTip.x, 0f, toTip.z);
+            if (flat.magnitude < reelDoneDistance)
+            {
+                ReturnToTip();
+                return;
+            }
+            Vector3 direction = toTip.normalized;
+            float along = Vector3.Dot(bobber.linearVelocity, direction);
+            float pull = Mathf.Max(0f, reelSpeed - along) * reelStrength;
+            bobber.AddForceAtPosition(direction * (bobber.mass * pull), bobber.transform.position, ForceMode.Force);
+        }
+
+        void ReturnToTip()
+        {
+            bobber.isKinematic = true;
+            state = State.Idle;
+            HoldAtTip();
+        }
+
+        void HoldAtTip()
+        {
+            Transform b = bobber.transform;
+            b.rotation = Quaternion.identity;
+            b.position = transform.position - b.TransformVector(bobberTop);
+        }
+    }
+}
+```
+
+- `State` 只有兩種：`Idle` 是掛在竿尖，`Out` 是拋出去了 (在空中或在水上)。
+- `Start` 先把浮標掛回竿尖，所以浮標一開始放在 Scene 的哪裡都可以。
+- `Update` 只在 `Idle` 時接受拋竿；拋出去之後再按 F 沒有作用。
+- `FixedUpdate` 在拋出去之後才讀 R；按著就呼叫 `Reel`。
+- `Cast` 先把浮標擺回竿尖再交給物理，確保從竿尖出發。
+- `Reel` 的 `pull` 是 $k_{\text{reel}} \max(0,\ v_{\text{reel}} - v_{\text{along}})$，乘上質量變成力。拉到岸邊時 `ReturnToTip` 把浮標掛回去。
+
+### 放進 Scene
+
+選取 `RodTip`，**Add Component** > **Fishing Rod**，把 Hierarchy 裡的 `Bobber` 拖進 **Bobber** 欄位。其他欄位都用預設。站到岸邊、面向湖，按 Play。
+
+### 現在應該看到
+
+- 浮標直立掛在竿尖下方，角色走動時跟著走。
+- 按 F：浮標往前上方飛出去，約 1.3 秒後落在前方 9 公尺左右的水面，往下鑽一段 (中心最深到水面下約 0.7 公尺)，浮上來時往一邊栽、最多約 60 度，3 秒左右轉回直立。
+- 按住 R：浮標以約 1.7 公尺 / 秒朝你滑回來，稍微往你這邊斜，靠近岸邊、線變陡時斜得多一些；從 9 公尺外拉回約 5 秒，到腳邊時跳回竿尖。放開 R，浮標停在原地漂著。
+- 浮標在外面時按 F：沒有反應。
+
+落水時往一邊栽，是因為水的阻力加在浮點的高度、重心的上方：往前衝的浮標，上半截先被擋住。
+
+| 看到的現象 | 原因通常是 | 怎麼修 |
+| --- | --- | --- |
+| Console 紅字 `The type or namespace name 'InputSystem' does not exist in the namespace 'UnityEngine'` | `Water.asmdef` 沒加 `Unity.InputSystem`，或沒按 Apply | 照上面加引用 |
+| Console 紅字 `NullReferenceException`，指向 `FishingRod` | Bobber 欄位是空的 | 把 `Bobber` 拖進去 |
+| 按 F 沒反應 | Game 視窗沒有焦點，鍵盤輸入送到別的視窗 | 先點一下 Game 視窗 |
+| 浮標往旁邊或往後飛 | `RodTip` 的 Z 軸沒有朝角色前方 | 把 `RodTip` 的 Rotation 改回 (0, 0, 0)，或轉到藍色軸朝前 |
+| 角色一走動就被擋住，或浮標一拋出去就撞到角色 | 浮標掛的位置和角色的 Collider 重疊 | 把 `RodTip` 往前、往上移 |
+| 往岸上拋時浮標穿過地面掉下去 | 浮標細、飛得快，一步物理就穿過地面 | 浮標 Rigidbody 的 **Collision Detection** 改成 **Continuous** |
+| 浮標被拉回來時翻過去 | 改過程式，拉力加在頂端 | 改回加在 `bobber.transform.position` |
+
+### 漂著，然後呢
+
+到這裡，浮標拋得出去、收得回來，但落水後就一直漂著，什麼事都不會發生。釣魚要有魚來咬：魚的 AI 不在這一章，這裡只要浮標「看起來」被咬，所以下一步用時間觸發幾個事件，依序把浮標輕點幾下、再拉進水裡。
+
+## 第四步：咬鉤
+
+### 用時間觸發的狀態流程
+
+**咬鉤不需要真的魚，只要浮標照固定的節奏動：等一會兒，被輕點幾下，再被往下拉沉。所以把第一版的 `Out` 拆成幾個狀態，每個狀態規定這段時間浮標受什麼力、到什麼時候換下一個；時間到了就換，收線就打斷。**
+
+<ex-fig of="fishing-rod-bite-states" caption="FishingRod 的狀態與換狀態的條件；框起來的三個狀態都在水裡" />
+
+| 狀態 | 浮標怎麼動 | 什麼時候換 |
+| --- | --- | --- |
+| `Idle` | 掛在竿尖 | 按 F → `Flying` |
+| `Flying` | 飛在空中，交給物理 | 落水 (中心低於水面) → `Waiting` |
+| `Waiting` | 交給 `Buoyancy`，漂著 | 等了 Wait Time (3 \~ 8 秒，每次隨機) → `Nibbling` |
+| `Nibbling` | 每 0.8 秒被往下拉 0.15 秒，共 2 \~ 4 下 | 拉完最後一下 → `Biting` |
+| `Biting` | 一直被往下拉，沉進水裡 | 1.5 秒內沒收線：魚跑掉 → `Waiting` |
+
+在水裡的三個狀態，只要按著 R 就收線，並回到 `Waiting` 重新計時 (收線把魚嚇跑了)；在 `Biting` 時收線，就是釣到了。釣到之後的流程不在這一章，這裡只在 Console 印一行。
+
+### 魚的拉力：浮標重量的幾倍
+
+魚往下拉，用 `AddForce` 加在重心上，浮標只往下沉，不會被拉歪。大小寫成浮標重量的幾倍，和 Buoyancy Ratio 用同一種單位：
+
+$$\mathbf{F}_{\text{fish}} = -\,k_{\text{fish}}\,m_{\text{bob}}\,g\ \hat{\mathbf{y}}$$
+
+$\hat{\mathbf{y}}$ 是正上方，負號表示往下；$k_{\text{fish}}$ 試咬時是 Nibble Pull 1，咬鉤時是 Bite Pull 1.2。
+
+拉多大才會整根沉下去，看浮標還剩多少浮力可用。$\beta = 2$ 的浮標靜止時泡一半，浮力 1 倍重量；整根泡進去時浮力最多 2 倍重量。所以要整根沉下去，往下的拉力得超過 $2 - 1 = 1$ 倍重量：
+
+- 試咬 ($k_{\text{fish}} = 1$，只拉 0.15 秒)：還來不及沉到底，拉力就停了。浮標往下點約 15 公分 (頂端從露出 0.25 公尺變成 0.10 公尺)，約 1 秒內浮回來。
+- 咬鉤 ($k_{\text{fish}} = 1.2$)：整根泡進去後，往上是 2 倍重量，往下是 $1 + 1.2 = 2.2$ 倍重量，還差 0.2 倍，浮標繼續往下沉。1.5 秒後頂端在水面下約 0.36 公尺；拉力停了之後約 1.6 秒浮回原來的高度。
+
+### 時間怎麼算
+
+每個狀態都記下進入它的時間 `stateStartTime`，在狀態裡用 `Time.time - stateStartTime` 算已經過了多久。換狀態一律呼叫 `Enter`，它同時改狀態、記時間，不會漏記。
+
+等多久、試咬幾下用 `Random.Range` 決定：
+
+| 呼叫 | 回傳 | 注意 |
+| --- | --- | --- |
+| `Random.Range(float min, float max)` | `min` 到 `max` 之間的 `float`，兩端都可能 | Wait Time 用它 |
+| `Random.Range(int min, int max)` | `min` 到 `max - 1` 之間的 `int`，**不含** `max` | 要 2 \~ 4 下，得寫 `Random.Range(2, 4 + 1)` |
+
+試咬用同一個狀態重複進入：每一下開始時 `Enter(State.Nibbling)`，前 0.15 秒往下拉，過了 0.8 秒就算下一下，剩下的次數減一，減到 0 就換 `Biting`。
+
+### FishingRod.cs：第二版
+
+```csharp Assets/Water/Scripts/FishingRod.cs FishingRod (第四步的版本)
+enum State { Idle, Flying, Waiting, Nibbling, Biting }
+…
+[Header("Bite")]
+[SerializeField] Vector2 waitTime = new Vector2(3f, 8f);            // 等多久才有魚來，秒 (最短、最長)
+[SerializeField] Vector2Int nibbleCount = new Vector2Int(2, 4);     // 試咬幾下 (最少、最多)
+[SerializeField] float nibbleInterval = 0.8f;   // 試咬每一下相隔多久，秒
+[SerializeField] float nibbleDuration = 0.15f;  // 試咬每一下拉多久，秒
+[SerializeField] float nibblePull = 1f;         // 試咬的拉力，浮標重量的幾倍
+[SerializeField] float biteDuration = 1.5f;     // 咬鉤後等你收線多久，秒
+[SerializeField] float bitePull = 1.2f;         // 咬鉤的拉力，浮標重量的幾倍
+
+State state;
+float stateStartTime;   // 進入目前狀態的時間 (Time.time)
+float waitDuration;     // 這一次要等多久
+int nibblesLeft;        // 還要試咬幾下
+…
+void FixedUpdate()
+{
+    if (state == State.Idle)
+    {
+        return;
+    }
+
+    Keyboard keyboard = Keyboard.current;
+    if (keyboard != null && keyboard[reelKey].isPressed)
+    {
+        if (state == State.Biting)
+        {
+            Debug.Log("FishingRod: hooked!", this);
+        }
+        if (state != State.Flying)
+        {
+            StartWaiting();   // 收線會把魚嚇跑：放開之後重新等
+        }
+        Reel();
+        return;
+    }
+
+    switch (state)
+    {
+        case State.Flying:
+            if (InWater())
+            {
+                StartWaiting();
+            }
+            break;
+
+        case State.Waiting:
+            if (Time.time - stateStartTime >= waitDuration)
+            {
+                nibblesLeft = Random.Range(nibbleCount.x, nibbleCount.y + 1);
+                Enter(State.Nibbling);
+            }
+            break;
+
+        case State.Nibbling:
+            float sinceTap = Time.time - stateStartTime;
+            if (sinceTap < nibbleDuration)
+            {
+                PullDown(nibblePull);
+            }
+            else if (sinceTap >= nibbleInterval)
+            {
+                nibblesLeft--;
+                Enter(nibblesLeft > 0 ? State.Nibbling : State.Biting);
+            }
+            break;
+
+        case State.Biting:
+            if (Time.time - stateStartTime < biteDuration)
+            {
+                PullDown(bitePull);
+            }
+            else
+            {
+                Debug.Log("FishingRod: the fish got away", this);
+                StartWaiting();
+            }
+            break;
+    }
+}
+…
+void Enter(State next)
+{
+    state = next;
+    stateStartTime = Time.time;
+}
+
+void StartWaiting()
+{
+    waitDuration = Random.Range(waitTime.x, waitTime.y);
+    Enter(State.Waiting);
+}
+
+void Cast()
+{
+    …
+    Enter(State.Flying);            // 原本是 state = State.Out;
+}
+…
+void PullDown(float times)
+{
+    bobber.AddForce(Physics.gravity * (bobber.mass * times), ForceMode.Force);
+}
+
+bool InWater()
+{
+    Vector3 p = bobber.transform.position;
+    return WaterBody.TryFind(p, out WaterBody water) && p.y < water.GetSurfaceHeight(p);
+}
+
+void ReturnToTip()
+{
+    bobber.isKinematic = true;
+    Enter(State.Idle);              // 原本是 state = State.Idle;
+    HoldAtTip();
+}
+```
+
+- 收線放在 `switch` 前面：按著 R 時，不論在哪個狀態都先收線，咬鉤的流程暫停。`Flying` 時收線不重新計時，因為浮標還沒落水。
+- `Flying` 每一步檢查 `InWater`：浮標的中心低於那裡的水面，就算落水。查水面用的是 [Wave Height Query](wave-height-query.html) 的 `WaterBody.TryFind` 與 `GetSurfaceHeight`；拋到岸上時找不到湖，就一直停在 `Flying`，收線照樣能拉回來。
+- `PullDown` 的 `Physics.gravity` 是朝下、長度 $g$ 的向量，乘上質量與倍數，就是 $k_{\text{fish}}\,m_{\text{bob}}\,g$ 往下。
+- 沒列出的部分 (欄位、`Update`、`LateUpdate`、`Reel`、`HoldAtTip`) 和第一版相同。
+
+### 現在應該看到
+
+- 拋出去落水後，等 3 \~ 8 秒，浮標被往下點 2 \~ 4 下，每下相隔不到 1 秒；接著整根被拉進水裡，約 1.5 秒後 Console 印出 `FishingRod: the fish got away`，浮標浮回來，再過幾秒又重來一輪。
+- 浮標沉下去時按住 R：Console 印出 `FishingRod: hooked!`，浮標被拉回來。
+- 浮標漂著、還沒被咬時按住 R 一下再放開：重新開始等。
+
+| 看到的現象 | 原因通常是 | 怎麼修 |
+| --- | --- | --- |
+| 落水後一直沒動靜 | 浮標的中心一直沒低於水面 (例如 Buoyancy Ratio 很大，浮標幾乎不泡水)，停在 `Flying` | Buoyancy Ratio 改回 2 |
+| 試咬的次數最多只到 3 下 | `Random.Range` 的第二個參數忘了 + 1 (int 版不含最大值) | 對照上面的程式 |
+| 咬鉤時浮標只沉一點，頂端還露在水面 | Bite Pull 小於 1：拉力撐不過剩下的浮力 | 改回 1.2 |
+| 浮標被拉到湖底 | Bite Pull 太大，或 Bite Duration 太長 | 改回 1.2、1.5 |
+| 一直印 `hooked!` | 收線後沒有換狀態 | 對照程式：收線時要 `StartWaiting()` |
+
+### 看不到線
+
+到這裡，浮標拋得出去、被咬得下去，但竿尖和浮標之間什麼都沒有：浮標像自己在動，收線時它也像被看不見的手拉回來。所以最後一步補上釣線。
+
+## 第五步：釣線
+
+### 先畫一條直線
+
+**釣線用 LineRenderer 畫：給它一串 world 座標的點，它就把點依序連成一條有寬度的帶子。最簡單的線只有兩個點，竿尖和浮標頂端；先畫出來看看哪裡不像。**
+
+[[LineRenderer]] 這一章用到的成員：
+
+| 成員 | 型別 | 用途 |
+| --- | --- | --- |
+| `positionCount` | `int` | 線有幾個點；要先設，再設點的位置 |
+| `SetPosition(int index, Vector3 position)` | 方法 | 設第 `index` 個點 |
+| `SetPositions(Vector3[] positions)` | 方法 | 一次設全部的點，比逐點設定快 |
+| `useWorldSpace` | `bool` | true：點是 world 座標；false：點跟著 LineRenderer 所在物件移動、旋轉 |
+| `widthMultiplier` | `float` | 線寬 (公尺) |
+
+點每一格都重新給，所以用 world 座標最直接，在 `Awake` 把 `useWorldSpace` 設成 true。
+
+1. 建立釣線的材質
+
+   在 `Assets/LakeDemo/Materials/` 建立 Material `M_FishingLine`，Shader 選 **Universal Render Pipeline/Unlit**，Base Map 的顏色選淺灰色。Unlit 不受光影響，細線在陰影裡也看得見。
+
+2. 在 `RodTip` 加上 LineRenderer
+
+   選取 `RodTip`，**Add Component** > Effects > **Line Renderer**，把 `M_FishingLine` 拖進 **Materials** 的 Element 0。線寬由 `FishingRod` 設定，不用改。
+
+3. 改程式
+
+   ```csharp Assets/Water/Scripts/FishingRod.cs FishingRod (第五步：直線)
+   [RequireComponent(typeof(LineRenderer))]
+   public class FishingRod : MonoBehaviour
+   {
+       …
+       LineRenderer line;
+       …
+       void Awake()
+       {
+           line = GetComponent<LineRenderer>();
+           line.useWorldSpace = true;
+           line.widthMultiplier = 0.02f;
+       }
+       …
+       void LateUpdate()
+       {
+           if (state == State.Idle)
+           {
+               HoldAtTip();
+           }
+           line.positionCount = 2;
+           line.SetPosition(0, transform.position);
+           line.SetPosition(1, bobber.transform.TransformPoint(bobberTop));
+       }
+   ```
+
+   線畫在 `LateUpdate`，理由和[擺浮標](#浮標掛在竿尖：Is-Kinematic)相同。`[RequireComponent(typeof(LineRenderer))]` 讓 `FishingRod` 所在的物件一定有 LineRenderer。
+
+4. 按 Play，拋竿
+
+   竿尖和浮標之間多了一條細線。
+
+### 直線太假
+
+直線的問題是它永遠繃著：浮標靜靜漂著、線應該是鬆的時候，它還是一根從 3 公尺高的竿尖斜插到水面的直桿，像浮標被一根棍子撐著；收線時線也是同一個樣子，看不出「現在在拉」。真的釣線鬆的時候會因為自己的重量往下垂，被拉的時候才繃直。
+
+所以線要能在「鬆：往下垂」和「緊：拉直」之間變化。物理模擬的繩子不在這一章，這裡用一條固定形狀的曲線，下垂多少由鬆緊決定。
+
+### 讓線垂下來
+
+<ex-fig of="fishing-line-sag-parabola" caption="示意：下垂的量放大了。兩端固定在竿尖與浮標頂端，正中間垂得最多" />
+
+線上的點用一個 0 到 1 的參數 $t_{\text{line}}$ 表示位置 (竿尖是 0，浮標頂端是 1)。每個點先取竿尖到浮標頂端的直線上那一點，再往下扣掉一段：
+
+$$\mathbf{p}(t_{\text{line}}) = \operatorname{lerp}(\mathbf{p}_{\text{tip}},\ \mathbf{p}_{\text{top}},\ t_{\text{line}}) - 4\,s_{\text{sag}}\,t_{\text{line}}(1 - t_{\text{line}})\ \hat{\mathbf{y}}$$
+
+- $\mathbf{p}_{\text{tip}}$、$\mathbf{p}_{\text{top}}$：竿尖與浮標頂端的 world 位置。
+- $4\,t_{\text{line}}(1 - t_{\text{line}})$：兩端是 0、正中間 ($t_{\text{line}} = 0.5$) 是 1，所以兩端不動，正中間往下 $s_{\text{sag}}$。這是一條拋物線，和真的懸線形狀很接近。
+- $s_{\text{sag}}$：正中間垂多少。
+
+線越長，鬆的時候垂得越多，所以 $s_{\text{sag}}$ 和竿尖到浮標的距離成正比：
+
+$$s_{\text{sag}} = r_{\text{sag}}\,\left|\mathbf{p}_{\text{top}} - \mathbf{p}_{\text{tip}}\right|\,(1 - c_{\text{tight}})$$
+
+- $r_{\text{sag}}$：鬆的時候，垂下距離的幾成 (Slack Sag，預設 0.04)。
+- $c_{\text{tight}}$：鬆緊，0 是鬆、1 是拉直 (程式裡的 `tightness`，下一節)。
+
+例：浮標漂在前方 9.4 公尺，竿尖高 3 公尺、浮標頂端高 0.25 公尺，距離 $\sqrt{9.4^2 + 2.75^2} \approx 9.8$ 公尺。線鬆的時候 $s_{\text{sag}} = 0.04 \times 9.8 \approx 0.39$ 公尺：十公尺的線，中間垂約 40 公分。
+
+曲線用 21 個點 (Line Segments 20 段) 畫，看起來就是平滑的。點的陣列在 `Awake` 配置一次，每一格只改內容，不重新配置。
+
+### 收緊時拉直
+
+鬆緊 $c_{\text{tight}}$ 的目標是：有東西在拉線 (收線、魚在拉) 或浮標還在飛時是 1，其他時候是 0。如果一下子跳過去，線會瞬間彈直，所以每一格用 `Mathf.MoveTowards` 往目標靠近一點：
+
+```csharp Mathf.MoveTowards()
+public static float MoveTowards(float current, float target, float maxDelta);
+```
+
+它把 `current` 往 `target` 移動，最多移 `maxDelta`，不會超過 `target`。每一格給 `tightenSpeed * Time.deltaTime`，一秒最多變 4 (Tighten Speed)，從鬆到緊約 0.25 秒。
+
+「有沒有東西在拉」在 `FixedUpdate` 裡決定：每一步物理先把 `pulling` 設成 false，`Reel` 或 `PullDown` 有加力就設成 true；`LateUpdate` 讀它決定目標。試咬每一下只拉 0.15 秒，鬆緊只來得及升到約 0.6 又放鬆，線就跟著抖一下。
+
+### FishingRod.cs：最後的版本
+
+```csharp Assets/Water/Scripts/FishingRod.cs FishingRod
+using UnityEngine;
+using UnityEngine.InputSystem;
+
+namespace Water
+{
+    // 掛在竿尖 (角色底下的空物件，藍色的 Z 軸朝角色前方)，配一個掛著 Buoyancy 的浮標。
+    //   拋竿：按 castKey，浮標從竿尖往前上方飛出去，落水後由 Buoyancy 讓它浮著。
+    //   收線：按住 reelKey，沿著釣線把浮標拉向竿尖；拉到離竿尖水平 reelDoneDistance 以內就收回竿尖。
+    //   咬鉤：浮標在水裡、沒在收線時，依「等待 → 試咬 → 咬鉤」往下走；咬鉤時沒收線，魚就跑掉，回到等待。
+    //   釣線：LineRenderer 從竿尖畫到浮標頂端；鬆的時候往下垂，收線、魚在拉、浮標在飛時拉直。
+    [RequireComponent(typeof(LineRenderer))]
+    public class FishingRod : MonoBehaviour
+    {
+        enum State { Idle, Flying, Waiting, Nibbling, Biting }
+
+        [SerializeField] Rigidbody bobber;                              // 掛著 Buoyancy 的浮標
+        [SerializeField] Vector3 bobberTop = new Vector3(0f, 1f, 0f);   // 浮標頂端 (綁線的地方)，浮標自己的座標
+
+        [Header("Input")]
+        [SerializeField] Key castKey = Key.F;     // 按一下拋竿
+        [SerializeField] Key reelKey = Key.R;     // 按住收線
+
+        [Header("Cast and Reel")]
+        [SerializeField] float castSpeed = 8f;          // 拋出去的速度，公尺 / 秒
+        [SerializeField] float castAngle = 30f;         // 拋出去的方向往上抬幾度
+        [SerializeField] float reelSpeed = 2f;          // 收線的速度，公尺 / 秒
+        [SerializeField] float reelStrength = 10f;      // 1 / 秒；越大越快追上收線的速度
+        [SerializeField] float reelDoneDistance = 1f;   // 拉到離竿尖水平多近就收回竿尖，公尺
+
+        [Header("Bite")]
+        [SerializeField] Vector2 waitTime = new Vector2(3f, 8f);            // 等多久才有魚來，秒 (最短、最長)
+        [SerializeField] Vector2Int nibbleCount = new Vector2Int(2, 4);     // 試咬幾下 (最少、最多)
+        [SerializeField] float nibbleInterval = 0.8f;   // 試咬每一下相隔多久，秒
+        [SerializeField] float nibbleDuration = 0.15f;  // 試咬每一下拉多久，秒
+        [SerializeField] float nibblePull = 1f;         // 試咬的拉力，浮標重量的幾倍
+        [SerializeField] float biteDuration = 1.5f;     // 咬鉤後等你收線多久，秒
+        [SerializeField] float bitePull = 1.2f;         // 咬鉤的拉力，浮標重量的幾倍
+
+        [Header("Line")]
+        [SerializeField] float lineWidth = 0.02f;       // 線寬，公尺
+        [SerializeField] int lineSegments = 20;         // 釣線分成幾段
+        [SerializeField] float slackSag = 0.04f;        // 線鬆的時候，中間垂下「竿尖到浮標距離」的幾倍
+        [SerializeField] float tightenSpeed = 4f;       // 鬆緊切換的速度，1 / 秒；4 是 0.25 秒從鬆到緊
+
+        LineRenderer line;
+        Vector3[] linePoints;
+        State state;
+        float stateStartTime;   // 進入目前狀態的時間 (Time.time)
+        float waitDuration;     // 這一次要等多久
+        int nibblesLeft;        // 還要試咬幾下
+        bool pulling;           // 這一步物理有沒有東西在拉線 (收線或魚)
+        float tightness;        // 釣線的鬆緊：0 是鬆，1 是拉直
+
+        void Awake()
+        {
+            line = GetComponent<LineRenderer>();
+            line.useWorldSpace = true;
+            line.widthMultiplier = lineWidth;
+            linePoints = new Vector3[Mathf.Max(lineSegments, 1) + 1];
+        }
+
+        void Start()
+        {
+            ReturnToTip();
+        }
+
+        // 讀「這一格剛按下」的按鍵：它以畫面的格為單位，所以在 Update 讀。
+        void Update()
+        {
+            Keyboard keyboard = Keyboard.current;
+            if (keyboard == null)
+            {
+                return;
+            }
+            if (state == State.Idle && keyboard[castKey].wasPressedThisFrame)
+            {
+                Cast();
+            }
+        }
+
+        // 力都在 FixedUpdate 加，每一步物理一次。
+        void FixedUpdate()
+        {
+            pulling = false;
+            if (state == State.Idle)
+            {
+                return;
+            }
+
+            Keyboard keyboard = Keyboard.current;
+            if (keyboard != null && keyboard[reelKey].isPressed)
+            {
+                if (state == State.Biting)
+                {
+                    Debug.Log("FishingRod: hooked!", this);
+                }
+                if (state != State.Flying)
+                {
+                    StartWaiting();   // 收線會把魚嚇跑：放開之後重新等
+                }
+                Reel();
+                return;
+            }
+
+            switch (state)
+            {
+                case State.Flying:
+                    if (InWater())
+                    {
+                        StartWaiting();
+                    }
+                    break;
+
+                case State.Waiting:
+                    if (Time.time - stateStartTime >= waitDuration)
+                    {
+                        nibblesLeft = Random.Range(nibbleCount.x, nibbleCount.y + 1);
+                        Enter(State.Nibbling);
+                    }
+                    break;
+
+                case State.Nibbling:
+                    float sinceTap = Time.time - stateStartTime;
+                    if (sinceTap < nibbleDuration)
+                    {
+                        PullDown(nibblePull);
+                    }
+                    else if (sinceTap >= nibbleInterval)
+                    {
+                        nibblesLeft--;
+                        Enter(nibblesLeft > 0 ? State.Nibbling : State.Biting);
+                    }
+                    break;
+
+                case State.Biting:
+                    if (Time.time - stateStartTime < biteDuration)
+                    {
+                        PullDown(bitePull);
+                    }
+                    else
+                    {
+                        Debug.Log("FishingRod: the fish got away", this);
+                        StartWaiting();
+                    }
+                    break;
+            }
+        }
+
+        // 物理與角色的動畫都更新完之後，才把浮標放回竿尖、畫釣線，兩者才會對齊竿尖這一格的位置。
+        void LateUpdate()
+        {
+            if (state == State.Idle)
+            {
+                HoldAtTip();
+            }
+            float target = (pulling || state == State.Flying) ? 1f : 0f;
+            tightness = Mathf.MoveTowards(tightness, target, tightenSpeed * Time.deltaTime);
+            DrawLine();
+        }
+
+        void Enter(State next)
+        {
+            state = next;
+            stateStartTime = Time.time;
+        }
+
+        void StartWaiting()
+        {
+            waitDuration = Random.Range(waitTime.x, waitTime.y);
+            Enter(State.Waiting);
+        }
+
+        // 交給物理，往竿尖面對的水平方向、往上抬 castAngle 度飛出去。
+        void Cast()
+        {
+            HoldAtTip();
+            bobber.isKinematic = false;
+            Vector3 flat = transform.forward;
+            flat.y = 0f;
+            flat.Normalize();
+            float angle = castAngle * Mathf.Deg2Rad;
+            bobber.linearVelocity = (flat * Mathf.Cos(angle) + Vector3.up * Mathf.Sin(angle)) * castSpeed;
+            bobber.angularVelocity = Vector3.zero;
+            Enter(State.Flying);
+        }
+
+        // 沿著竿尖方向拉：速度比收線速度慢多少就拉多大；已經夠快就不拉 (線只能拉，不能推)。
+        void Reel()
+        {
+            Vector3 toTip = transform.position - bobber.transform.TransformPoint(bobberTop);
+            Vector3 flat = new Vector3(toTip.x, 0f, toTip.z);
+            if (flat.magnitude < reelDoneDistance)
+            {
+                ReturnToTip();
+                return;
+            }
+            Vector3 direction = toTip.normalized;
+            float along = Vector3.Dot(bobber.linearVelocity, direction);
+            float pull = Mathf.Max(0f, reelSpeed - along) * reelStrength;
+            // 加在浮點的高度 (物體的原點)：水的阻力也在這個高度，浮標不會被拉翻
+            bobber.AddForceAtPosition(direction * (bobber.mass * pull), bobber.transform.position, ForceMode.Force);
+            pulling = true;
+        }
+
+        // 魚往下拉：拉力是浮標重量的 times 倍，加在重心，只往下沉、不會被拉歪。
+        void PullDown(float times)
+        {
+            bobber.AddForce(Physics.gravity * (bobber.mass * times), ForceMode.Force);
+            pulling = true;
+        }
+
+        bool InWater()
+        {
+            Vector3 p = bobber.transform.position;
+            return WaterBody.TryFind(p, out WaterBody water) && p.y < water.GetSurfaceHeight(p);
+        }
+
+        void ReturnToTip()
+        {
+            bobber.isKinematic = true;
+            Enter(State.Idle);
+            HoldAtTip();
+        }
+
+        // 浮標直立掛在竿尖下方，頂端對齊竿尖。
+        void HoldAtTip()
+        {
+            Transform b = bobber.transform;
+            b.rotation = Quaternion.identity;
+            b.position = transform.position - b.TransformVector(bobberTop);
+        }
+
+        // 從竿尖到浮標頂端，直線往下扣掉 4 · sag · t(1 − t)：兩端不動，中間垂得最多。
+        void DrawLine()
+        {
+            Vector3 start = transform.position;
+            Vector3 end = bobber.transform.TransformPoint(bobberTop);
+            float sag = slackSag * Vector3.Distance(start, end) * (1f - tightness);
+            for (int i = 0; i < linePoints.Length; i++)
+            {
+                float t = i / (linePoints.Length - 1f);
+                linePoints[i] = Vector3.Lerp(start, end, t) + Vector3.down * (4f * sag * t * (1f - t));
+            }
+            line.positionCount = linePoints.Length;
+            line.SetPositions(linePoints);
+        }
+    }
+}
+```
+
+和第四版比，改了這些地方：
+
+- `[RequireComponent(typeof(LineRenderer))]` 與 `Line` 區的欄位：線寬 (原本寫死的 0.02 改成欄位)、段數、$r_{\text{sag}}$、Tighten Speed。
+- `Awake` 取 LineRenderer、設 world 座標與線寬，配置 `linePoints`。
+- `pulling` 在 `FixedUpdate` 開頭歸零，`Reel`、`PullDown` 加力時設成 true。
+- `LateUpdate` 算鬆緊、呼叫 `DrawLine`；`DrawLine` 就是上面 $\mathbf{p}(t_{\text{line}})$ 的式子，`t` 是 $t_{\text{line}}$，`sag` 是 $s_{\text{sag}}$。
+
+### 放進 Scene
+
+存檔回到 Unity，`RodTip` 的 `FishingRod` 多了 **Line** 區的四個欄位，都用預設。
+
+換成你自己的浮標與竿子時，這幾個欄位要對上：
+
+| 欄位 | 怎麼填 |
+| --- | --- |
+| Bobber | 掛著 `Buoyancy`、重心壓低的浮標 |
+| Bobber Top | 浮標頂端在浮標自己座標裡的位置；Capsule 是 (0, 1, 0)，自己的模型看 mesh 的範圍 |
+| Cast Speed | 想拋多遠：竿尖高 3 公尺、Cast Angle 30 時，8 約 9 公尺 |
+| Bite Pull | 大於 Buoyancy Ratio − 1 才會整根沉下去 |
+
+### 現在應該看到
+
+- 浮標掛在竿尖時看不到線 (竿尖和浮標頂端在同一點)。
+- 按 F：線跟著浮標拉出去，飛行中是直的；落水後約 0.25 秒內鬆下來，中間微微下垂。
+- 試咬時線跟著抖一下；咬鉤時線拉直，斜斜地指向沉下去的浮標。
+- 按住 R：線拉直；放開：又鬆下來。
+
+| 看到的現象 | 原因通常是 | 怎麼修 |
+| --- | --- | --- |
+| 線是洋紅色 | LineRenderer 沒有指派材質，或材質的 Shader 不是 URP 的 | 指派 `M_FishingLine` |
+| 線很粗，像一根木板 | 程式還是沒有設定線寬的版本，用了 LineRenderer 預設的寬度 | 對照最後的程式，`Awake` 要設 `widthMultiplier` |
+| 線的一端在世界原點附近 | `useWorldSpace` 是 false | 對照最後的程式，`Awake` 要設成 true |
+| 線遠看斷斷續續、時有時無 | 線太細，比一個像素還窄 | Line Width 加大，例如 0.03 |
+| 浮標拋得很遠時，線靠浮標那段鑽進水裡 | 距離長，垂得多 | Slack Sag 改小 |
+
+## 回頭看
+
+### 接回開頭的問題
+
+開頭的問題是：方塊浮得起來，浮標還不會釣魚。一路下來：
+
+| 步驟 | 解決的 | 留下的東西 |
+| --- | --- | --- |
+| [第一步](#第一步：把方塊換成浮標) | 浮標浮起來 | 同一個 `Buoyancy`，Column Height 改成浮標的高度；細長的浮標轉正的 torque 只有方塊的約 1/50 |
+| [第二步](#第二步：壓低重心) | 站不穩 | Center Of Mass 壓低 0.1 m：$\tau_{\text{com}} = m_{\text{bob}}\,g\,h_{\text{com}}\sin\theta_{\text{tilt}}$；越低越直、越不跟浪歪 |
+| [第三步](#第三步：拋竿與收線) | 只能手擺 | `FishingRod`：Is Kinematic 掛在竿尖；拋竿直接設定速度；收線 $F_{\text{reel}} = m_{\text{bob}}\,k_{\text{reel}}\max(0,\ v_{\text{reel}} - v_{\text{along}})$ |
+| [第四步](#第四步：咬鉤) | 沒有魚 | 時間觸發的狀態流程：`Waiting` → `Nibbling` → `Biting`；拉力超過剩下的浮力才會整根沉下去 |
+| [第五步](#第五步：釣線) | 看不到線 | LineRenderer 畫拋物線，下垂量和距離成正比、乘上 $1 - c_{\text{tight}}$ |
+
+浮標能直立，靠的是重心壓在浮點下方，讓重力和浮力錯開成轉正的力；拋竿、收線、咬鉤都只是在不同的時間對同一個浮標加力，浮起來、跟著浪動仍然全部交給 `Buoyancy`；釣線不參與物理，只依「有沒有東西在拉」決定畫直還是畫彎。
+
+### 檢查點：浮標漂著、咬鉤、釣線
+
+做對時你會看到：
+
+- 站在岸邊按 F：浮標拋到前方約 9 公尺，落水後栽一下，3 秒左右轉回直立，頂端露出水面約 0.25 公尺；釣線從竿尖連到浮標，微微下垂。
+- Height Scale 1：浮標跟著浪起伏，大致直立，浪經過時微微歪，最多約 5 度。
+- 等 3 \~ 8 秒：浮標被輕點 2 \~ 4 下，線跟著抖；接著整根被拉進水裡，線拉直。不收線，1.5 秒後 Console 印 `the fish got away`，浮標浮回來；收線則印 `hooked!`。
+- 按住 R：線拉直，浮標滑回岸邊，到腳邊時回到竿尖。
+- 調效果用 Scene 視窗；最後用角色的攝影機在 Game 視窗確認一次。
+
+| 看到的現象 | 原因通常是 | 回到哪一步 |
+| --- | --- | --- |
+| 浮標浮著但晃很久才轉回直立 | 重心沒壓低 (Automatic Center Of Mass 還勾著) | [第二步](#第二步：壓低重心) |
+| 浮標整根沉下去或浮太高 | Column Height 不是浮標的高度，或 Buoyancy Ratio 不是 2 | [第一步](#第一步：把方塊換成浮標) |
+| 按 F 沒反應、Console 有 InputSystem 的紅字 | `Water.asmdef` 沒加 `Unity.InputSystem` | [第三步](#第三步：拋竿與收線) |
+| 落水後一直沒有魚 | 浮標停在 `Flying` (中心沒低於水面) | [第四步](#第四步：咬鉤) |
+| 咬鉤時浮標沒整根沉下去 | Bite Pull 小於 Buoyancy Ratio − 1 | [第四步](#第四步：咬鉤) |
+| 線是直的，不會下垂 | Slack Sag 是 0，或 `tightness` 一直是 1 | [第五步](#第五步：釣線) |
+
+**對應 Final Demo**：「浮標會跟著波浪上下起伏、左右傾斜」完成 (第 13 章做出原理，這一章用在浮標上)；「魚咬鉤時浮標下沉」完成；同一條裡的「浮標入水時產生漣漪」，機制在 [Interactive Ripples](interactive-ripples.html)，浮標掛上 `WaterSplash` 見那一章的[「掛到浮標上」](interactive-ripples.html#掛到浮標上)。
+
+此時你的專案裡，以下檔案應該和教材 GitHub repo 的[範例程式碼](https://github.com/RogelioKG/explain-waterbody/tree/main/urp-water/unity)相同：
+
+- `Assets/Water/Scripts/FishingRod.cs` (這一章新增)
+- `Assets/Water/Scripts/Buoyancy.cs`、`WaterBody.cs`、`WaterSettings.cs`、`WaterMesh.cs`、`WaterHeightProbe.cs` (這一章沒有改它們)
+
+`Assets/Water/Water.asmdef` 的引用清單裡要有 `Unity.InputSystem`；repo 裡的版本另外還有第 16 章才加的兩個 URP 引用，還沒做到第 16 章時少這兩個是正常的。浮標、`RodTip`、兩個材質在你的 Scene 與 `Assets/LakeDemo/` 裡，不在 repo 裡。
+
+### 自我檢查
+
+::: q 把浮標的 Center Of Mass 從 (0, −0.1, 0) 改成 (0, −0.3, 0)，重心跑到浮標底端 (−0.25) 的外面，會怎樣？
+浮標照樣浮在同一個高度：浮力和重力的大小都沒變，重心只影響轉。
+
+轉回直立更快、更不跟浪歪。$\tau_{\text{com}} = m_{\text{bob}}\,g\,h_{\text{com}}\sin\theta_{\text{tilt}}$ 的 $h_{\text{com}}$ 從 0.1 變成 0.3，同樣的傾斜，扳回來的 torque 變成 3 倍，浪的斜坡造成的那一點兩側深淺差更扳不動它，浮標幾乎一直垂直。
+
+重心在物體外面不是錯誤：真的釣具裡，鉛墜就掛在浮標下方的線上，整組的重心本來就在浮標外面。
+:::
+
+::: q 把 Bite Pull 從 1.2 改成 0.8，咬鉤時浮標會怎樣？
+不會整根沉下去。往下的力是重量加拉力，$1 + 0.8 = 1.8$ 倍重量；浮力在泡進 $f_{\text{sub}}$ 時是 $\beta f_{\text{sub}} = 2 f_{\text{sub}}$ 倍重量，兩者相等時 $f_{\text{sub}} = 0.9$，還沒到整根泡進去的 1。
+
+所以浮標往下沉到泡進九成就停住，頂端還露出水面 $0.5 \times 0.1 = 0.05$ 公尺。要整根沉下去，Bite Pull 得大於 $\beta - 1 = 1$。
+:::
+
+::: q 把 Cast Angle 從 30 改成 0 或 45，Cast Speed 不變，浮標落在多遠？
+落點是「水平速度 × 飛行時間」。抬得越高，往上的速度越大、飛得越久，但水平速度越小，兩者互相抵銷。浮標的中心從水面上 2.75 公尺出發，高度是 $y(t) = 2.75 + v_{\text{cast}} \sin\alpha_{\text{cast}}\, t - \tfrac{1}{2} g t^2$，解 $y = 0$ 得飛行時間：
+
+- 0 度：沒有往上的速度，$t = \sqrt{2 \times 2.75 / 9.81} \approx 0.75$ 秒，落在 $8 \times 0.75 = 6.0$ 公尺。
+- 30 度：前面算過，約 1.26 秒、8.7 公尺。
+- 45 度：往上、往前都是 $8 \times 0.707 \approx 5.66$ 公尺 / 秒，$t \approx 1.52$ 秒，落在 $5.66 \times 1.52 \approx 8.6$ 公尺，反而比 30 度近一點。
+
+從平地拋，45 度最遠；從高處拋，就算不往上抬也已經有下落的時間，所以最遠的角度比 45 度小。
+:::
+
+### 下一步
+
+- 下一章 [Interactive Ripples](interactive-ripples.html)：物體、角色穿過水面時產生漣漪與水花；最後一節[「掛到浮標上」](interactive-ripples.html#掛到浮標上)把它用在浮標上。
+
+### 請回報
+
+以下是官方文件沒有寫清楚、需要你在 Unity 裡看一眼的事：
+
+| # | 去哪裡看 | 回報什麼 |
+| --- | --- | --- |
+| 1 | 每一步改完程式後的 Console | 有沒有紅字或黃字，有的話第一行是什麼 |
+| 2 | Window > Package Management > Package Manager；Project Settings > Player > Active Input Handling | 有沒有 Input System、版本；Active Input Handling 的值 |
+| 3 | 浮標的 Rigidbody Inspector，取消勾選 Automatic Center Of Mass 的那一刻 | Center Of Mass 欄位一開始顯示的值 |
+| 4 | [第一步](#第一步：把方塊換成浮標)：Rotation Z 30、中心離水面約 0.5 公尺放下 | 會不會躺平；大約幾秒轉回直立 |
+| 5 | [第二步](#第二步：壓低重心)：同樣的放法，Center Of Mass (0, −0.1, 0) | 大約幾秒轉回直立；Height Scale 1 時最多歪幾度 |
+| 6 | [第三步](#第三步：拋竿與收線)：拋竿、收線 | 落在多遠；落水後最多栽幾度、幾秒轉回直立；收線大約幾秒拉回 |
+| 7 | [第四步](#第四步：咬鉤)：咬鉤 | 試咬時浮標往下點多深；咬鉤時是否整根沉下去 |
+| 8 | [第五步](#第五步：釣線)：LineRenderer 的 Inspector | Add Component 後 Materials 預設是什麼、線是什麼顏色；Width 欄位顯示的值在 Play 後是否變成 0.02 |
+
+## 來源
+
+### 官方文件
+
+縮寫：`SR` = `https://docs.unity.com/en-us/engine/6000.3/script-reference/unityengine`，`M` = `https://docs.unity.com/en-us/engine/6000.3/manual` (都是 Unity 6000.3)。
+
+- Rigidbody 元件的 Automatic Center Of Mass (取消勾選可自己填 X、Y、Z)、Angular Damping 預設 0.05：`M/physics-section/physics-overview/rigidbody/class-rigidbody`
+- `Rigidbody.centerOfMass` (相對物體的位置與旋轉，不反映 Scale；壓低重心讓車子不易翻)：`SR/rigidbody/centerofmass`；`Rigidbody.automaticCenterOfMass`：`SR/rigidbody/automaticcenterofmass`
+- `Rigidbody.isKinematic` (力與碰撞不再影響它，由程式改 Transform 控制)：`SR/rigidbody/iskinematic`
+- `Rigidbody.linearVelocity` (平常用 AddForce；跳躍這種瞬間改變速度的情形才直接設定；範例用 Input System 讀鍵盤)：`SR/rigidbody/linearvelocity`；`Rigidbody.angularVelocity`：`SR/rigidbody/angularvelocity`
+- `Transform.TransformVector` (不受位置影響，受 Scale 影響)：`SR/transform/transformvector`
+- `Random.Range` (float 版兩端都含；int 版不含最大值)：`SR/random/range`
+- `Mathf.MoveTowards`：`SR/mathf/movetowards`
+- `LineRenderer`、`LineRenderer.positionCount`、`SetPosition`、`SetPositions` (要先設 positionCount)、`useWorldSpace`、`widthMultiplier`：`SR/linerenderer`、`SR/linerenderer/positioncount`、`SR/linerenderer/setposition`、`SR/linerenderer/setpositions`、`SR/linerenderer/useworldspace`、`SR/linerenderer/widthmultiplier`
+- 輸入的兩種方式 (預設由 Input System 套件提供；舊的 Input Manager 已停用)：`M/input/introduction`、`M/input`
+- Input System 的 `Keyboard.current`、`Keyboard[Key]`、`ButtonControl.wasPressedThisFrame`、`isPressed`，直接讀裝置的寫法：https://docs.unity3d.com/Packages/com.unity.inputsystem@1.14/api/UnityEngine.InputSystem.Keyboard.html 、https://docs.unity3d.com/Packages/com.unity.inputsystem@1.14/api/UnityEngine.InputSystem.Controls.ButtonControl.html 、https://docs.unity3d.com/Packages/com.unity.inputsystem@1.14/manual/Workflow-Direct.html
+- Input System 的程式集名稱 `Unity.InputSystem`：Input System 原始碼的 `Unity.InputSystem.asmdef`，https://github.com/Unity-Technologies/InputSystem
+
+### 數字
+
+- 各步「現在應該看到」的秒數、角度、深度、距離，與「重心越低」那張表：用 `Buoyancy` 最後版本的算法與這一章的 `FishingRod` 在 Python 裡做 3D 剛體模擬 (浮標當成高 0.5 m、直徑 0.1 m 的圓柱算轉動慣量；每步 0.02 秒，先更新速度再更新位置；水面用 `WaterBody.GetSurfaceHeight` 的同一套算法與預設的 4 個波；Angular Damping 0.05)。沒有在 Unity 裡實際跑過，PhysX 的積分方式與 Capsule 的轉動慣量和模擬不完全一樣，實際數字可能有出入 (見「請回報」)
+- 方塊與浮標轉正 torque 的比較、$\tau_{\text{com}}$、拋竿落點、魚的拉力與剩餘浮力、釣線下垂量：直接計算
+</script>
+<script>
+explainer({
+  title: 'Fishing Bobber',
+  assumes: ['Unity 編輯器的基本操作 (看完 Unity Learn 的 Basic 與 Creative Core)', 'C# 基礎', { t: 'Buoyancy (Buoyancy 元件：Points、Column Height、Buoyancy Ratio、Water Drag)', href: 'buoyancy.html' }, { t: 'Wave Height Query (WaterBody.TryFind、GetSurfaceHeight)', href: 'wave-height-query.html' }, { t: 'URP Setup (練習專案、湖、你的角色)', href: 'urp-setup.html' }, { t: 'URP Waterbody (總覽)', href: 'urp-water.html' }],
+  approach: '重新發明：先把方塊換成浮標，由「站不穩、晃很久」帶出壓低重心；再依序加上拋竿與收線、咬鉤下沉、釣線 (先畫直線，太假才讓它下垂)',
+  env: 'Windows 11、Unity 6000.3.20f1 (英文介面)、URP 17.3',
+  terms: {
+    '浮點': '查水面高度、算浮力的位置；代表物體裡一根以它為中心、高 Column Height 的垂直柱子 (Buoyancy 的 Points)',
+    '重心': '物體受重力時等效的那一個點：重力像是全部加在這裡。Rigidbody 預設依 Collider 的形狀自動算出',
+    'torque': '力矩：力加在離重心有一段距離的地方時，讓物體繞重心轉的效果；大小是力 × 重心到力的作用線的距離',
+    'Input System': 'Unity 6 預設的輸入套件 (com.unity.inputsystem)，命名空間 UnityEngine.InputSystem；可以直接讀鍵盤，例如 Keyboard.current',
+    'LineRenderer': '把一串點依序連成一條有寬度的帶子的元件；點的數量用 positionCount、位置用 SetPositions 設定',
+  },
+});
+</script>
+</body>
+</html>

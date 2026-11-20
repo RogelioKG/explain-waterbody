@@ -1,0 +1,702 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wave Height Query</title>
+<script src="../_explainer/explainer.js"></script>
+</head>
+<body>
+<script type="text/markdown" id="ex-content">
+## 這一章要解決的問題
+
+### 水面的高度只在 GPU 上
+
+做完 [Reflection](reflection.html)，湖面看起來已經完整。但水面的起伏是 GPU 每一格畫水面時，用 `GerstnerWaves.hlsl` 把 vertex 推上推下算出來的，算完就拿去畫，C# 這一邊不知道水面在哪。想讓一顆浮標跟著浪起落、判斷攝影機在水面上還是水面下，都得先回答一個問題：
+
+> 水平位置 $(x, z)$ 這一點，此刻的水面在多高？
+
+這一章讓 `WaterBody` 回答它：給一個 world space 的位置，回傳那一點正上方 (或正下方) 水面的 Y。做法是在 C# 裡再算一次和 shader 相同的波浪公式，再加上一個 shader 不需要、C# 卻少不了的反推步驟。另一條路是把 GPU 算好的結果讀回 C#，這一章不走那條路；這一章也只查高度，不查水面的傾斜方向。
+
+### 這一章怎麼走
+
+| 步驟 | 做什麼 | 接下來要處理的 |
+| --- | --- | --- |
+| [第一步](#第一步：放一顆測試小球) | 定下查詢的介面，先回傳靜止的水面；放一顆測試小球檢查 | 球不跟著浪動 |
+| [第二步](#第二步：把波浪公式照抄成-C#) | 把波浪公式照抄成 C#，把要查的點直接代進去 | 斜坡上的球懸空 |
+| [第三步](#第三步：反推原始位置) | 反推「被推到這一點的 vertex 原本在哪」，再用它算高度 | 每顆球都要手動指定查哪一片湖 |
+| [第四步](#第四步：依位置找出所在的湖) | 依位置找出所在的湖 | |
+
+每一步之後都有「現在應該看到」和對照表。[第一步](#第一步：放一顆測試小球)到[第三步](#第三步：反推原始位置)的示意圖都是水面的側面切面：沿著一個波的前進方向，把水面垂直切開來看；[第四步](#第四步：依位置找出所在的湖)的示意圖從上往下看。
+
+## 第一步：放一顆測試小球
+
+### 先定下查詢，再準備檢查它的工具
+
+**這一步還不算波浪，只做兩件之後每一步都要用的事：在 `WaterBody` 上定下查詢的介面 `GetSurfaceHeight`，先讓它回傳靜止的水面高度；再放一顆小球，每一格把自己移到查到的高度。因為查到的高度只是一個數字，印出來看不出對不對，小球卻看得出來：小球的中心放在查到的高度，所以查得對時，球永遠剛好一半泡在水裡；查得太低，泡進水裡的超過一半，甚至整顆沉下去；查得太高，泡進水裡的不到一半，甚至懸空，球底和水面之間有一段空隙。**
+
+之後每一步改的都是查詢裡面的算法，介面和小球不再變，所以每改一次，按 Play 看小球是不是一半泡在水裡，就知道改對了沒有。
+
+下面依序展開：查詢的輸入、輸出與放在哪裡；還沒算波浪時，最好的答案是什麼；小球怎麼每格跟著查到的高度移動。
+
+### 查詢長什麼樣子
+
+查詢是 `WaterBody` 的一個 public 函式：
+
+```csharp Assets/Water/Scripts/WaterBody.cs GetSurfaceHeight() 的簽名
+public float GetSurfaceHeight(Vector3 worldPosition)
+```
+
+| 參數 | 型別 | 用途 |
+| --- | --- | --- |
+| `worldPosition` | `Vector3` | 要查的位置，world space；只看 x、z，y 是多少都不影響結果 |
+| 回傳值 | `float` | 那一點正上方或正下方水面的 Y，world space |
+
+輸入用 `Vector3`，因為呼叫的一方手上通常就是 `transform.position`，直接傳進來即可；y 不看，所以攝影機在水面上或水面下，問到的都是同一個水面。函式放在 `WaterBody` 上，因為它同時握有算高度需要的兩樣東西：設定資產 (波浪參數) 和水面 GameObject 的位置 (靜止時的水面高度)。
+
+### WaterBody.cs：先回傳靜止的水面
+
+還沒算波浪之前，查詢至少要答得出靜止的水面在多高。[Gerstner Waves](gerstner-waves.html) 說過，水面的高度來自 GameObject 的位置：平面 mesh 的 vertex 在 GameObject 自己的座標裡 Y 都是 0，shader 用的是 vertex 的 world space 位置，所以水面 GameObject 的 Y 就是靜止時的水面高度，記作 $y_0$。浪是在 $y_0$ 的上下起伏，所以還沒算波浪時，最好的答案就是 $y_0$：
+
+```csharp Assets/Water/Scripts/WaterBody.cs GetSurfaceHeight() (第一步的版本)
+public float GetSurfaceHeight(Vector3 worldPosition)
+{
+    return transform.position.y;
+}
+```
+
+把它加在 `CurrentTime()` 的上面。`WaterBody.cs` 的其他部分不動。
+
+### WaterHeightProbe.cs：第一版
+
+接著做檢查用的小球：每一格把它的 Y 設成查到的高度，X、Z 不動。在 `Assets/Water/Scripts/` 建立 `WaterHeightProbe.cs`：
+
+```csharp Assets/Water/Scripts/WaterHeightProbe.cs WaterHeightProbe (第一步的版本)
+using UnityEngine;
+
+namespace Water
+{
+    public class WaterHeightProbe : MonoBehaviour
+    {
+        [SerializeField] WaterBody water;   // 要查的那片水，這一步先手動指定
+
+        void Update()
+        {
+            Vector3 position = transform.position;
+            position.y = water.GetSurfaceHeight(position);
+            transform.position = position;
+        }
+    }
+}
+```
+
+- `Update` 每一格呼叫一次：讀出自己的位置，把 y 換成查到的高度，再寫回去。x、z 不動。
+- `Vector3` 是 struct (值型別)：`position` 是一份複本，改了 `position.y` 不會影響物件，所以最後要寫回 `transform.position`。
+- 這個類別沒有加 `[ExecuteAlways]`，只在按下 Play 之後執行。不按 Play 時它不會改你的物件，你可以自由擺放小球。
+
+### 放進 Scene
+
+1. 準備一顆小球
+
+   GameObject > 3D Object > **Sphere**，縮小到直徑 0.2 公尺左右，放在水面範圍內。球越小，越容易看出幾公分的偏差。它只用來看高度，不需要 Rigidbody。
+
+2. 掛上元件
+
+   選取小球，Inspector 的 **Add Component** > **Water Height Probe**。把 Hierarchy 裡的 `WaterSurface` 拖進 **Water** 欄位。
+
+3. 按 Play
+
+### 現在應該看到
+
+- 按下 Play，小球的中心立刻移到 Y = 0 (水面 GameObject 的 Y)，之後一直停在那裡。浪峰經過時球泡在水裡，浪谷經過時球露在空中。
+- Play 中把 `Lake` 的 Y 暫時改成 2：小球跟著升高 2 公尺。改回 0。(Play 中的修改在停止後會自動還原。)
+
+<ex-fig of="float-rest-height-mismatch" caption="示意：陡度 0.5、波長 6 m 的單一個波，水平與垂直同比例" />
+
+| 看到的現象 | 原因通常是 | 怎麼修 |
+| --- | --- | --- |
+| Console 紅字 `NullReferenceException`，指向 `WaterHeightProbe` | **Water** 欄位是空的 | 把 `WaterSurface` 拖進去 |
+| 小球停在原本的位置，完全不動 | 沒有按 Play | 按 Play |
+| Console 紅字 `does not contain a definition for 'GetSurfaceHeight'` | `WaterBody.cs` 沒存檔，或函式沒加 `public` | 對照上面的程式 |
+
+到這裡，查詢有了固定的介面，也有了檢查它的小球；但查詢只回傳 $y_0$，不知道有浪，所以上圖的球在浪峰經過時泡在水裡、浪谷經過時露在空中。畫面上的浪是 `GerstnerWaves.hlsl` 用 Gerstner 公式算的，而公式要的輸入 (vertex 的位置、時間、波浪參數) C# 這邊都拿得到，所以下一步在 C# 裡算同一條公式。
+
+## 第二步：把波浪公式照抄成 C#
+
+### 和 shader 算同一件事
+
+**C# 要查到畫面上的那個水面，就要算出和 shader 一樣的位移：同一條公式、同一組參數、同一個時間。所以這一步把 `GerstnerWaves.hlsl` 算位移的那幾行逐行照抄成 C# 的 `WaveOffset`，參數和時間都從 shader 拿到它們的同一個地方讀；查詢先用最直接的方式：把要查的點代進公式，取位移的高度。**
+
+三樣東西各自從哪來：
+
+- **公式**：照抄 HLSL 裡算位移的那幾行，一行對一行，兩邊才不會在哪個細節上算得不同。
+- **參數**：`WaterBody` 寫進 Material 的值來自 `settings.GetPackedWave(i)` 和 `settings.HeightScale`，C# 也從這裡讀。不合理的值 (例如方向是 0) 已經在 `GetPackedWave` 裡修正過，兩邊拿到的一定是同一組。
+- **時間**：shader 的時間是 `WaterBody` 每格用 `CurrentTime()` 寫進 `_WaterTime` 的值，C# 也呼叫 `CurrentTime()`。
+
+下面依序展開：先回想 shader 算的是哪條式子；C# 怎麼逐行照抄；查詢怎麼用它；時間為什麼一定要用 `CurrentTime()`。
+
+### 先回想 shader 算的位移
+
+[Gerstner Waves](gerstner-waves.html) 疊加的 4 個波，把平面上原本在 $(x_0, z_0)$ 的 vertex 推到 $P(x_0, z_0)$。$(x_0, z_0)$ 是 vertex 被推動之前的水平位置，這一章叫它[[原始位置]]：
+
+$$P(x_0, z_0) = (x_0,\ y_0,\ z_0) + \sum_{i=0}^{3} \big(d_{ix} A_i'\cos \varphi_i,\ \ A_i'\sin \varphi_i,\ \ d_{iz} A_i'\cos \varphi_i\big)$$
+
+$$\varphi_i = k_i\,\big(\mathbf{d}_i \cdot (x_0, z_0)\big) - \omega_i t, \qquad k_i = \frac{2\pi}{L_i}, \qquad \omega_i = \sqrt{g\,k_i}, \qquad A_i' = h\,A_i = \frac{h\,S_i}{k_i}$$
+
+| 符號 | 意思 |
+| --- | --- |
+| $\mathbf{d}_i = (d_{ix}, d_{iz})$ | 第 $i$ 個波的前進方向，長度 1 |
+| $L_i$、$S_i$ | 第 $i$ 個波的波長、陡度 (設定資產裡的值) |
+| $k_i$、$\omega_i$ | 角波數、角頻率；$g = 9.81$ 公尺 / 秒² 是重力加速度 |
+| $h$ | 浪高總控 (Height Scale)，乘在每個波的振幅上 |
+| $A_i'$ | 乘過浪高總控的振幅 |
+| $\varphi_i$ | 第 $i$ 個波的相位 |
+| $t$ | 時間 |
+| $y_0$ | 水面 GameObject 的 Y ([第一步](#第一步：放一顆測試小球)) |
+
+Gerstner Waves 把靜止的水面寫成高度 0；shader 實際上是把位移加在 vertex 的 world space 位置上，所以起點是 $y_0$。
+
+這一章把位移拆成水平和高度兩部分，各寫成原始位置的函式。原始位置用一個字母 $p = (x_0, z_0)$ 代表，因為[第三步](#第三步：反推原始位置)要替它加上「第幾次猜測」的下標：
+
+$$u(p) = \sum_{i=0}^{3} A_i'\cos \varphi_i\,\mathbf{d}_i, \qquad \zeta(p) = \sum_{i=0}^{3} A_i'\sin \varphi_i$$
+
+原本在 $p$ 的 vertex，被推到水平位置 $p + u(p)$，高度 $y_0 + \zeta(p)$。$u(p)$ 是二維的水平位移，$\zeta(p)$ 是高度的位移，兩者都隨位置 $p$ 而變。
+
+### WaveOffset：一行對一行
+
+shader 裡算上面這個位移的，是 HLSL 迴圈裡的這幾行 (算 tangent 的兩行這一章用不到)：
+
+```hlsl Assets/Water/Shaders/GerstnerWaves.hlsl GerstnerWaves_float() 的位移部分
+for (int i = 0; i < 4; i++)
+{
+    float2 d = normalize(waves[i].xy);
+    float steepness = waves[i].z * HeightScale;
+    float k = 6.28318530 / waves[i].w;
+    float omega = sqrt(9.81 * k);
+    float phi = k * dot(d, PositionWS.xz) - omega * WaveTime;
+    float a = steepness / k;
+    float s = sin(phi);
+    float c = cos(phi);
+
+    offset += float3(d.x * a * c, a * s, d.y * a * c);
+    …
+}
+```
+
+C# 版逐行照抄，加在 `GetSurfaceHeight` 的下面：
+
+```csharp Assets/Water/Scripts/WaterBody.cs WaveOffset()
+// 原本在水平位置 positionXZ 的 vertex 被 4 個波推了多少 (世界座標，公尺)。
+// 逐行照抄 GerstnerWaves.hlsl 的位移部分，參數和寫進 Material 的值同一個來源。
+Vector3 WaveOffset(Vector2 positionXZ, float time)
+{
+    float heightScale = settings.HeightScale;
+    Vector3 offset = Vector3.zero;
+    for (int i = 0; i < WaterSettings.WaveCount; i++)
+    {
+        Vector4 wave = settings.GetPackedWave(i);
+        Vector2 d = new Vector2(wave.x, wave.y).normalized;
+        float steepness = wave.z * heightScale;
+        float k = 6.28318530f / wave.w;
+        float omega = Mathf.Sqrt(9.81f * k);
+        float phi = k * Vector2.Dot(d, positionXZ) - omega * time;
+        float a = steepness / k;
+        float s = Mathf.Sin(phi);
+        float c = Mathf.Cos(phi);
+
+        offset += new Vector3(d.x * a * c, a * s, d.y * a * c);
+    }
+    return offset;
+}
+```
+
+| HLSL | C# | 說明 |
+| --- | --- | --- |
+| `float2`、`float3`、`float4` | `Vector2`、`Vector3`、`Vector4` | 分量名稱一樣是 `.x`、`.y`、`.z`、`.w` |
+| `waves[i]` | `settings.GetPackedWave(i)` | 同一個 Vector 4：(方向 X, 方向 Z, 陡度, 波長) |
+| `normalize(v)` | `v.normalized` | 變成長度 1 的向量 |
+| `dot(a, b)` | `Vector2.Dot(a, b)` | 內積 |
+| `sin`、`cos`、`sqrt` | `Mathf.Sin`、`Mathf.Cos`、`Mathf.Sqrt` | 角度一樣用弧度 |
+| `6.28318530`、`9.81` | `6.28318530f`、`9.81f` | C# 裡帶小數點的數字預設是 `double`，要加 `f` 才是 `float` |
+| `PositionWS.xz` | `positionXZ` | vertex 被推動之前的水平位置 $p$，world space |
+
+程式裡的變數對應上面的符號：`d` 是 $\mathbf{d}_i$，`steepness` 是乘過浪高總控的陡度 $h\,S_i$，`k` 是 $k_i$，`omega` 是 $\omega_i$，`phi` 是 $\varphi_i$，`a` 是 $A_i'$。
+
+迴圈跑 `WaterSettings.WaveCount` 次，也就是 4 次，和 HLSL 相同。回傳的 `offset` 就是 $P(x_0, z_0)$ 式子裡 $\sum$ 的那一項：$x$、$z$ 是水平位移 $u(p)$，$y$ 是高度的位移 $\zeta(p)$。
+
+### GetSurfaceHeight：第二版
+
+有了 `WaveOffset`，查詢最直接的寫法是：把要查的水平位置 $q = (x, z)$ 當成原始位置代進去，取高度的位移：
+
+$$y = y_0 + \zeta(q)$$
+
+$\zeta(q)$ 就是 `WaveOffset(q).y`。
+
+```csharp Assets/Water/Scripts/WaterBody.cs GetSurfaceHeight() (第二步的版本)
+public float GetSurfaceHeight(Vector3 worldPosition)
+{
+    float restHeight = transform.position.y;
+    if (settings == null)
+    {
+        return restHeight;
+    }
+    Vector2 target = new Vector2(worldPosition.x, worldPosition.z);
+    return restHeight + WaveOffset(target, CurrentTime()).y;
+}
+```
+
+`settings` 是空的時候水面不會動 (`WaterBody` 不寫 Material)，回傳靜止的高度剛好正確。
+
+### 時間用 CurrentTime()
+
+三樣輸入裡，時間最容易對不上。水面在兩種模式下用不同的時鐘：按 Play 時是 `Time.time`，不按 Play 時是編輯器啟動後的秒數 (`EditorApplication.timeSinceStartup`)，`CurrentTime()` 依模式挑一個。查詢呼叫同一個函式，任何時候查到的都是眼前這一個水面。
+
+同一格裡，`Time.time` 不管在誰的 `Update` 裡讀都是同一個值。查詢只用時間和設定資產，不讀 Material，所以小球的 `Update` 和 `WaterBody` 的 `Update` 誰先執行都沒關係。
+
+### 現在應該看到
+
+- 按 Play，小球跟著浪上下起伏。
+- 在 `SO_LakeWater` 把 **Height Scale** 暫時改成 2 (陡度加總 0.9，還不會出現警告)，攝影機貼近小球、從側面看浪經過：浪峰、浪谷經過時，球一半泡在水裡；斜坡經過時，球懸空。
+- Height Scale 先留在 2，下一步還要用。
+
+| 看到的現象 | 原因通常是 | 怎麼修 |
+| --- | --- | --- |
+| 球的起伏和浪完全對不上，時高時低 | `WaveOffset` 和 HLSL 有一行不同，常見的是少了 `.normalized`，或相位 $\varphi$ (程式裡的 `phi`) 的正負號 | 對照上面的程式 |
+| 球起伏的幅度比浪大或小 | 少乘了 `heightScale` (Height Scale 不是 1 時才看得出來) | 對照上面的程式 |
+| Console 紅字 `cannot implicitly convert type 'double' to 'float'` | 數字少了 `f` | 補上 `f` |
+
+### 斜坡上的球為什麼懸空：查到的是另一個 vertex
+
+到這裡，C# 算出的位移和 shader 一樣，球也跟著浪起伏了；但斜坡上的球懸空，表示查到的高度偏高。下圖用單一個波重現這個現象，並和 [第三步：反推原始位置](#第三步：反推原始位置) 的做法「反推 4 次」對照：
+
+<iframe src="../_diagram/interactive/probe-balls-naive-vs-solved/index.html" title="球心放在查到的高度時，直接代公式和反推 4 次的球各泡進水裡多少？" style="height:420px"></iframe>
+
+直接代公式時，空隙只出在斜坡上，浪峰、浪谷的球和反推後一樣一半泡在水裡。公式沒有抄錯，錯在代進去的位置。
+
+shader 做的事是：原本在 $p$ 的 vertex，被推到水平位置 $p + u(p)$，畫在高度 $y_0 + \zeta(p)$。[第二步](#第二步：把波浪公式照抄成-C#)把 $q$ 代進去，算到的是「原本在 $q$ 的 vertex」的高度；可是這個 vertex 已經被往旁邊推到 $q + u(q)$，它的高度不是 $q$ 這一點的水面。真正在 $q$ 正上方的，是另一個從別處被推過來的 vertex。
+
+<ex-fig of="gerstner-vertex-drift-query" caption="示意：單一個波 (陡度 0.5、波長 6 m)，時間 t = 0，水平與垂直同比例。虛線是靜止水面，箭頭是 vertex 被推動的位移" />
+
+用同一個波算一次：陡度 $S = 0.5$、波長 $L = 6$ 公尺，沿 $x$ 前進，$h = 1$，時間 $t = 0$。只有一個沿 $x$ 前進的波時，水平位置只剩 $x$ 一個數，上面的兩個函式變成
+
+$$u(p) = A\cos(kp), \qquad \zeta(p) = A\sin(kp), \qquad k = \frac{2\pi}{6} \approx 1.047, \qquad A = \frac{S}{k} = \frac{0.5}{1.047} \approx 0.477$$
+
+查 $q = 1.00$ 公尺：
+
+- 直接代公式：$\zeta(1.00) = 0.477\sin(1.047 \times 1.00) \approx 0.41$ 公尺。這個 vertex 被推到 $1.00 + u(1.00) = 1.00 + 0.477\cos(1.047) \approx 1.24$。
+- 真正在 $x = 1.00$ 上方的 vertex 原本在 $p \approx 0.62$：它被推到 $0.62 + 0.477\cos(1.047 \times 0.62) \approx 0.62 + 0.38 = 1.00$，高度 $\zeta(0.62) = 0.477\sin(0.649) \approx 0.29$ 公尺。
+
+差了 12 公分。在浪峰和浪谷，$\cos\varphi = 0$，水平位移是 0，vertex 沒有被推走，所以直接代公式剛好正確；離浪峰、浪谷越遠，被推得越多，錯得越多。把每一點都直接代公式，畫出來的是 $y_0 + A\sin(kq)$，也就是 Gerstner Waves 的 [sine 波](gerstner-waves.html#sine-波哪裡不對)，波峰太圓。Gerstner 波靠水平位移把 vertex 擠向波峰，波峰才變尖；直接代公式只用了高度、丟掉了水平位移，所以斜坡上偏高，球懸空。
+
+湖上預設的 4 個波也一樣。在湖面各處取樣，直接代公式查到的高度比真正的水面高出：
+
+| Height Scale | 最多高出 | 平均高出 |
+| --- | --- | --- |
+| 1 | 12 公分 | 3 公分 |
+| 2 | 45 公分 | 12 公分 |
+
+因為預設的浪平均只高出 3 公分，不到球的半徑 10 公分，球大多仍有一部分泡在水裡，看不出懸空；所以前面要把 Height Scale 改成 2 再看。
+
+[Gerstner Waves](gerstner-waves.html#normal-從哪裡來：兩條-tangent) 說過，Gerstner 波只能寫成「輸入原始位置、輸出移動後的位置」的參數式，不能直接寫成「水平位置對應到高度」；查詢問的卻正是後者。所以要先從 $q$ 找回原始位置：被推到 $q$ 的那個 vertex，原始位置 $p$ 滿足
+
+$$p + u(p) = q$$
+
+找到 $p$ 之後，高度就是 $y = y_0 + \zeta(p)$。
+
+這條方程式沒辦法把 $p$ 移到一邊。單一個波時它是 $p + A\cos(kp - \omega t) = q$：$p$ 同時出現在 $\cos$ 的外面和裡面，沒有公式能把它單獨解出來，4 個波疊在一起更不可能。但反方向很好算：給一個 $p$，`WaveOffset` 馬上算得出它被推到哪。所以下一步用這個好算的方向，猜出 $p$。
+
+## 第三步：反推原始位置
+
+### 猜一個原始位置，再依落點修正
+
+**從 $q$ 開始猜原始位置，看猜的 vertex 被推到哪，落點偏多少就往回移多少，再猜一次；因為陡度加總小於 1，每移一次誤差至少縮成原本的 $S_{\text{sum}}$ 倍，所以重複幾次就逼近答案。**
+
+### fixed-point iteration
+
+把上一步的方程式移項：
+
+$$p = q - u(p)$$
+
+$p$ 同時出現在左邊和右邊 $u(p)$ 的括號裡：因為要算 $u(p)$ 得先知道 $p$，所以右邊沒辦法直接算出來。那就先猜一個 $p$ 代進 $u(\cdot)$，右邊算出一個新的 $p$，再把它代回 $u(\cdot)$，一直重複。這叫 [[fixed-point iteration]] (定點迭代：反覆把上一次的結果代回同一個式子，直到代進去和算出來的是同一個值)：
+
+$$p_0 = q, \qquad p_{n+1} = q - u(p_n)$$
+
+$p_n$ 是第 $n$ 次的猜測；第 0 次猜 $q$ 本身，也就是[第二步](#第二步：把波浪公式照抄成-C#)的直接代公式。這條式子就是「落點偏多少，就往回移多少」：$p_n$ 的落點 $p_n + u(p_n)$ 比 $q$ 偏了 $p_n + u(p_n) - q$，扣掉它就是下一次的猜測：
+
+$$p_{n+1} = p_n - \big(p_n + u(p_n) - q\big) = q - u(p_n)$$
+
+拿上一步的例子走一遍：$q = 1.00$ 公尺，要找的原始位置是上一步算出的 $p \approx 0.620$，高度 $\zeta(0.620) \approx 0.289$ 公尺。
+
+| 第幾次 $n$ | 猜測 $p_n$ | 落點 $p_n + u(p_n)$ | 落點偏了 | 高度 $\zeta(p_n)$ | 高度偏了 |
+| --- | --- | --- | --- | --- | --- |
+| 0 | 1.000 | 1.239 | +0.239 | 0.414 | +0.125 |
+| 1 | 0.761 | 1.095 | +0.095 | 0.342 | +0.053 |
+| 2 | 0.666 | 1.032 | +0.032 | 0.307 | +0.018 |
+| 3 | 0.634 | 1.010 | +0.010 | 0.294 | +0.006 |
+| 4 | 0.624 | 1.003 | +0.003 | 0.290 | +0.002 |
+
+每一次，落點的偏差大約剩下前一次的三分之一，4 次之後高度只差 2 毫米。
+
+<iframe src="../_diagram/interactive/height-query-iteration/index.html" title="fixed-point iteration 怎麼一步步找到被推到目標點的 vertex？" style="height:500px"></iframe>
+
+### 為什麼會收斂
+
+上面的偏差每次都縮小，不是這個例子的巧合：只要陡度加總小於 1，一定縮小。設真正的答案是 $p^{*}$，它滿足 $p^{*} = q - u(p^{*})$。拿第 $n + 1$ 次的猜測減掉它：
+
+$$p_{n+1} - p^{*} = -\big(u(p_n) - u(p^{*})\big)$$
+
+所以下一次的誤差，等於兩個位置的水平位移差多少。[Gerstner Waves](gerstner-waves.html#波峰打結：振幅有上限) 算過這個量：兩個原始位置相差 $\Delta x_0$ 時，水平位移相差
+
+$$A\cos(\varphi + k\,\Delta x_0) - A\cos \varphi \approx (k\,\Delta x_0)\cdot A\,(-\sin \varphi) = -Ak\sin \varphi\,\Delta x_0 = -S\sin \varphi\,\Delta x_0$$
+
+$S = kA$ 是陡度。因為 $|\sin\varphi| \le 1$，所以位移差最多是 $S\,|\Delta x_0|$。這裡的 $\Delta x_0$ 就是 $p_n - p^{*}$，代進來：
+
+$$|p_{n+1} - p^{*}| \le S\,|p_n - p^{*}|$$
+
+每一次，誤差至少縮小成 $S$ 倍。上面的例子 $S = 0.5$，實際每次剩三分之一左右，因為答案附近 $\varphi = kp^{*} \approx 1.047 \times 0.620 \approx 0.65$，$\sin\varphi$ 只有 0.6，每次縮成約 $0.5 \times 0.6 = 0.3$ 倍。
+
+4 個波時，每個波的水平位移只沿著自己的方向 $\mathbf{d}_i$，照同樣的推導，第 $i$ 個波讓兩點的位移最多差 $h\,S_i\,|p_n - p^{*}|$。4 個加起來，係數最多是陡度加總 $S_{\text{sum}}$：
+
+$$S_{\text{sum}} = h \sum_{i=0}^{3} S_i, \qquad |p_{n+1} - p^{*}| \le S_{\text{sum}}\,|p_n - p^{*}|$$
+
+$p$ 是二維的位置，$|\cdot|$ 是兩點之間的距離。$S_{\text{sum}}$ 就是 `settings.TotalSteepness()`。
+
+所以 $S_{\text{sum}} < 1$ 時誤差每次都變小，一定收斂到唯一的答案。這正是 Gerstner Waves 的陡度上限 $h \sum_i S_i \le 1$，也是 `WaterBody` 印出警告的那個上限，所以照常設定的水面，反推一定成功。
+
+陡度越接近 1，每次縮小得越少，收斂得越慢。超過 1 時浪峰打結，同一個 $q$ 上方疊著好幾個 vertex，答案不只一個，猜測可能在它們之間游移；在浪谷附近，答案雖然只有一個，猜測卻會在它兩側來回跳、越跳越遠，不會收斂。
+
+<iframe src="../_diagram/interactive/iteration-steepness/index.html" title="陡度變大時，fixed-point iteration 收斂得多快？" style="height:580px"></iframe>
+
+### 為什麼固定 4 次
+
+收斂是一定的，剩下的問題是要修幾次。拿預設的 4 個波，在湖面各處取樣，看反推幾次之後查到的高度最多還差多少：
+
+<ex-bars of="errBars" />
+
+| 反推次數 | Height Scale 1 ($S_{\text{sum}} = 0.45$) | Height Scale 2 ($S_{\text{sum}} = 0.9$) |
+| --- | --- | --- |
+| 0 (直接代公式) | 12 公分 | 45 公分 |
+| 1 | 1.5 公分 | 13 公分 |
+| 2 | 3 毫米 | 5 公分 |
+| 3 | 0.5 毫米 | 1.9 公分 |
+| 4 | 0.1 毫米 | 8 毫米 |
+
+4 個方向不同的波，擠壓分散在不同方向，所以實際收斂得比 $S_{\text{sum}}$ 估的快：$S_{\text{sum}} = 0.9$ 時每次大約縮小成一半以下。
+
+畫面上的水面本身也不是公式的精確形狀：mesh 每 0.3 公尺一個 vertex，vertex 之間是平的三角形。三角形和公式的高度差，Height Scale 1 時最多約 6 毫米，Height Scale 2 時最多約 1.3 公分。反推 4 次的誤差已經比這個小，再多算幾次，畫面上也看不出差別。
+
+次數用常數，不是算到誤差夠小才停：每次查詢固定呼叫 5 次 `WaveOffset` (反推 4 次加最後算高度 1 次)，成本固定，容易估算一格能查幾次。
+
+因為反推的殘差和 mesh 的三角形都會讓查到的高度和畫面差幾毫米到一公分多，C# 和 shader 的 `sin`、`cos` 又分別在 CPU 和 GPU 上算，不保證算出完全相同的數字，所以檢查時看的是「球一直大約一半泡在水裡，不會懸空或整顆沉下去」，不是像素級的對齊。
+
+### GetSurfaceHeight：最後的版本
+
+把迭代寫進查詢：
+
+```csharp Assets/Water/Scripts/WaterBody.cs GetSurfaceHeight()
+const int SolveIterations = 4;   // 反推原始位置的次數，固定為常數，成本可預估
+…
+// worldPosition 正上方 (或正下方) 的水面在世界中的 Y。只看 x、z，輸入的 y 不影響結果。
+public float GetSurfaceHeight(Vector3 worldPosition)
+{
+    float restHeight = transform.position.y;
+    if (settings == null)
+    {
+        return restHeight;
+    }
+    float time = CurrentTime();
+    Vector2 target = new Vector2(worldPosition.x, worldPosition.z);
+
+    // 找出「被推到 target 的那個 vertex」原本在哪：p + 水平位移(p) = target。
+    // 沒有公式能直接解出 p，用定點迭代：每次把猜測的位移扣回去。陡度加總小於 1 時一定收斂。
+    Vector2 p = target;
+    for (int i = 0; i < SolveIterations; i++)
+    {
+        Vector3 guessOffset = WaveOffset(p, time);
+        p = target - new Vector2(guessOffset.x, guessOffset.z);
+    }
+    return restHeight + WaveOffset(p, time).y;
+}
+```
+
+- `SolveIterations` 放在類別的欄位區，和其他常數放一起。
+- `time` 只取一次：5 次 `WaveOffset` 必須用同一個時間。
+- `p = target` 是 $p_0 = q$；迴圈裡的一行是 $p_{n+1} = q - u(p_n)$，$u(p_n)$ 是 `WaveOffset` 回傳值的 $x$、$z$。
+- 最後用反推出的 `p` 取高度 $\zeta(p)$，不是用 `target`。
+
+### 現在應該看到
+
+- Height Scale 還是 2：小球在浪峰、浪谷、斜坡上都一樣，一直大約一半泡在水裡。[第二步](#第二步：把波浪公式照抄成-C#)斜坡上懸空的情形消失了。
+- 在 `SO_LakeWater` 把 Height Scale 改回 1。小球照樣一半泡在水裡。
+
+| 看到的現象 | 原因通常是 | 怎麼修 |
+| --- | --- | --- |
+| 斜坡上的球還是懸空，和[第二步](#第二步：把波浪公式照抄成-C#)一樣 | 最後一行用的是 `target` 而不是 `p` | 改成 `WaveOffset(p, time).y` |
+| 球亂跳，和浪沒有關係 | 迴圈裡寫成 `target + …` (正負號反了) | 改成 `target - …` |
+
+到這裡，不論在浪峰、浪谷還是斜坡上，查到的高度都和畫面上的水面一致。但查詢是某一片 `WaterBody` 的函式，小球得先在 **Water** 欄位拖進一片水才能查。一顆被拋出去的浮標、一個到處飛的攝影機，事先不知道自己會落在哪片湖；同一張地圖上可以有好幾片湖，高度各不相同，問錯了湖，查到的高度就是錯的：`GetSurfaceHeight` 不檢查位置在不在自己的範圍內，照樣用那片湖的 $y_0$ 和波浪來算。
+
+每片湖其實知道自己蓋住哪裡：平面 mesh 的範圍，加上 GameObject 的位置與方向。所以下一步讓呼叫的一方只給位置，由 `WaterBody` 逐一問每片湖「這個位置在不在你的範圍內」，找到的那片再查高度。
+
+## 第四步：依位置找出所在的湖
+
+### 先找湖，再查高度
+
+**查高度之前，先依位置找出它在哪片湖裡：`WaterBody` 用一份共用的清單記下所有啟用中的水面，再逐一把位置換到每片水面自己的 local 座標，和平面的範圍比 $x$、$z$，第一個涵蓋它的就是答案。小球改成每格先找湖、找到才查高度，就不再需要 Water 欄位。**
+
+這件事分兩半：記下目前有哪些水面，以及判斷一個位置在不在某片水面的範圍內；最後用 `TryFind` 把兩半接起來。
+
+下面依序展開：清單怎麼一直和場景一致；範圍為什麼要在 local 座標裡比；`TryFind` 和最後的小球。
+
+### 記下所有啟用中的水面
+
+第一半是清單。在 `WaterBody` 裡放一個所有 `WaterBody` 共用的清單：
+
+```csharp Assets/Water/Scripts/WaterBody.cs 清單
+// 所有啟用中的水面：OnEnable 加入、OnDisable 移除，兩者一定成對呼叫，所以不需要另外清空。
+// 湖彼此不重疊，所以依位置找湖時取第一個符合的即可。
+static readonly List<WaterBody> active = new List<WaterBody>();
+```
+
+`static` 表示這個欄位屬於類別本身，不屬於某一個元件：場景裡不管有幾個 `WaterBody`，都共用同一個 `active`。`List<T>` 在 `System.Collections.Generic` 命名空間，檔案開頭要加一行 `using System.Collections.Generic;`。
+
+元件啟用時加進清單，停用時拿掉：
+
+```csharp Assets/Water/Scripts/WaterBody.cs OnEnable()、OnDisable() 新增的部分
+void OnEnable()
+{
+    …
+    if (!active.Contains(this))
+    {
+        active.Add(this);
+    }
+}
+
+void OnDisable()
+{
+    active.Remove(this);
+    …
+}
+```
+
+`WaterBody` 有 `[ExecuteAlways]`，所以不按 Play 時 `OnEnable` 也會執行，清單在編輯時就有內容。停用 GameObject、刪除它、切換場景時都會呼叫 `OnDisable`，清單不會留著已經不在的水面。
+
+按 Play 時，Unity 預設會重新載入所有 C# 程式，叫 [[Domain Reload]]：static 欄位回到初始值，清單從空的開始，場景裡的水面各自在 `OnEnable` 加回來。Domain Reload 可以在 Project Settings > Editor > **Enter Play Mode Settings** 關掉 (讓進入 Play 更快)，關掉之後 static 欄位會保留原本的內容。清單照樣正確：它記的是「此刻啟用中的水面」，每片水面的加入和移除都由它自己的 `OnEnable`、`OnDisable` 成對負責，什麼時候看都和場景一致，不需要在進入 Play 時另外清空。
+
+### 判斷位置在不在這片水面上
+
+第二半是範圍。水面是 `WaterMesh` 產生的平面，中心在 GameObject 的位置。範圍要用水面自己的座標來比，因為水面 GameObject 可能轉了方向：
+
+<ex-fig of="rotated-lake-bounds-local-test" caption="示意：兩片湖從上往下看。湖 B 繞 Y 軸轉了 30 度" />
+
+`Transform.InverseTransformPoint` 把 world space 的位置換成這個 GameObject 的 local 座標 (mesh 的 vertex 就是用這個座標存的)：
+
+```csharp Transform.InverseTransformPoint()
+public Vector3 InverseTransformPoint(Vector3 position);
+```
+
+| 參數 | 型別 | 用途 |
+| --- | --- | --- |
+| `position` | `Vector3` | world space 的位置 |
+| 回傳值 | `Vector3` | 同一個點在這個 GameObject 的 local 座標 |
+換過去之後，平面的範圍就是 mesh 的 bounds：`Mesh.bounds` 是 mesh 在 local 座標裡的盒子，`.min`、`.max` 是它的兩個角。預設 60 × 60 公尺的水面，$x$ 和 $z$ 都在 −30\~30 (上圖的湖畫得比較小，是 −18\~18)。只比 $x$、$z$，不比 $y$：
+
+```csharp Assets/Water/Scripts/WaterBody.cs Covers()
+// 位置轉回水面的 local 座標，和平面網格的範圍比 x、z。
+// 不用 Renderer.bounds：它是 world 的軸對齊盒子，水面旋轉時比實際大，而且被 UpdateBounds 放大過。
+bool Covers(Vector3 worldPosition)
+{
+    if (meshFilter == null || meshFilter.sharedMesh == null)
+    {
+        return false;
+    }
+    Vector3 local = transform.InverseTransformPoint(worldPosition);
+    Bounds flat = meshFilter.sharedMesh.bounds;
+    return local.x >= flat.min.x && local.x <= flat.max.x
+        && local.z >= flat.min.z && local.z <= flat.max.z;
+}
+```
+
+不用 Renderer 的 bounds 有兩個原因。它是 world space 裡和座標軸對齊的盒子，水面轉了方向時，盒子比水面大 (上圖湖 B 的虛線)；而且 `WaterBody` 每格依浪高把它放大過。
+
+### TryFind
+
+兩半接起來：逐一問清單裡的水面涵不涵蓋這個位置，第一個涵蓋的就是答案。
+
+```csharp Assets/Water/Scripts/WaterBody.cs TryFind()
+// 找出 worldPosition 所在的湖 (只看 x、z)。不在任何一片湖的範圍內時回傳 false。
+public static bool TryFind(Vector3 worldPosition, out WaterBody body)
+{
+    for (int i = 0; i < active.Count; i++)
+    {
+        WaterBody candidate = active[i];
+        // 保險：已被 Destroy 的元件和 null 比較會是 true，跳過它
+        if (candidate != null && candidate.Covers(worldPosition))
+        {
+            body = candidate;
+            return true;
+        }
+    }
+    body = null;
+    return false;
+}
+```
+
+- `out WaterBody body`：函式把找到的水面寫進呼叫者提供的變數。回傳值只說找到沒有，和 `Dictionary.TryGetValue` 是同一種寫法。
+- `static`：不需要先有一個 `WaterBody` 才能呼叫，寫成 `WaterBody.TryFind(…)`。
+- 湖彼此不重疊，找到第一個就回傳。
+- `candidate != null` 是保險：Unity 的元件被 Destroy 之後，和 `null` 比較會得到 true。正常情況下 `OnDisable` 早就把它移出清單，這一行只防萬一。
+
+`WaterBody.cs` 這一步加的東西 (清單、`OnEnable` 與 `OnDisable` 的兩行、`TryFind`、`Covers`) 都在上面；完整檔案在 教材 GitHub repo 的 [`Assets/Water/Scripts/WaterBody.cs`](https://github.com/RogelioKG/explain-waterbody/blob/main/urp-water/unity/Assets/Water/Scripts/WaterBody.cs)，類別開頭的註解也多了第 4 點。
+
+### WaterHeightProbe.cs：最後的版本
+
+小球不再需要 **Water** 欄位，每格先找湖，找到才查高度：
+
+```csharp Assets/Water/Scripts/WaterHeightProbe.cs WaterHeightProbe
+using UnityEngine;
+
+namespace Water
+{
+    // 測試與除錯用：每一格把這個物件的 Y 設成它所在位置的水面高度，X、Z 不動。
+    // 掛在一顆小球上按 Play，小球應該一直貼著水面起伏。不在任何一片湖的範圍內時不動。
+    public class WaterHeightProbe : MonoBehaviour
+    {
+        void Update()
+        {
+            Vector3 position = transform.position;
+            if (WaterBody.TryFind(position, out WaterBody body))
+            {
+                position.y = body.GetSurfaceHeight(position);
+                transform.position = position;
+            }
+        }
+    }
+}
+```
+
+`out WaterBody body` 寫在呼叫的地方，同時宣告了變數 `body`。不在任何一片湖裡時，小球維持原來的位置。這個元件之後可以留著當除錯工具：懷疑哪裡的水面高度不對，就丟一顆小球過去看。
+
+### 現在應該看到
+
+- 小球的 Inspector 裡 **Water** 欄位不見了。按 Play，小球照樣跟著浪起伏，一半泡在水裡。
+- Play 中把小球往旁邊移出水面 (水面從 `Lake` 的中心往四邊各 30 公尺，例如把小球的 X 改成 `Lake` 的 X 加 40)：小球停在最後的高度，不再起伏。移回湖裡，又開始跟著浪。
+- 第二片湖：Play 中選取 `WaterSurface`，按 Ctrl+D 複製，把複製出的 Position 改成 (70, 2, 0) (它在 `Lake` 底下，這是相對 `Lake` 的位置)。把小球移到它上方 (X 是 `Lake` 的 X 加 70，Z 和 `Lake` 相同)：小球在 Y = 2 附近跟著浪起伏。停止 Play 後，複製出的水面自動消失。
+
+| 看到的現象 | 原因通常是 | 怎麼修 |
+| --- | --- | --- |
+| Console 紅字 `The type or namespace name 'List<>' could not be found` | 少了 `using System.Collections.Generic;` | 加在檔案開頭 |
+| 小球在湖裡也不動 | `WaterSurface` 的 `WaterBody` 沒有勾選 (停用)，或湖的 GameObject 被停用 | 勾選 |
+| 小球在第二片湖上停在 Y = 0 附近 | 複製出的水面位置不是 Y = 2，或小球其實還在第一片湖的範圍內 | 確認兩者的 Position |
+
+## 回頭看
+
+### 接回開頭的問題
+
+開頭的問題是：C# 怎麼知道 $(x, z)$ 這一點此刻的水面在多高。一路下來：
+
+| 步驟 | 解決的 | 留下的東西 |
+| --- | --- | --- |
+| [第一步](#第一步：放一顆測試小球) | 查詢的樣子、怎麼檢查 | `GetSurfaceHeight(Vector3)`、測試小球 `WaterHeightProbe` |
+| [第二步](#第二步：把波浪公式照抄成-C#) | C# 不知道波浪 | `WaveOffset`：逐行照抄 HLSL，參數與時間和 shader 同一個來源 |
+| [第三步](#第三步：反推原始位置) | 斜坡上偏高 | 反推原始位置 $p + u(p) = q$：fixed-point iteration 固定 4 次 |
+| [第四步](#第四步：依位置找出所在的湖) | 要手動指定哪片湖 | 啟用中水面的清單、`TryFind`、用 local 座標比範圍 |
+
+<ex-fig of="wave-settings-shader-csharp-sync" caption="做完這一章：設定資產與時間同時送到 shader 和 C# 的查詢" />
+
+### 檢查點：C# 查得到任一點的水面高度
+
+做對時你會看到：
+
+- 按 Play，小球一直大約一半泡在水裡，跟著浪起伏；浪峰、浪谷、斜坡都一樣。
+- Height Scale 改成 2，小球仍然一半泡在水裡；改回 1。
+- 小球移出湖的範圍就停住，移回來又開始起伏。
+- 複製一片 Y = 2 的水面，小球放上去，在 Y = 2 附近起伏。
+- 調效果用 Scene 視窗；最後用角色的攝影機在 Game 視窗確認一次。
+
+<ex-fig of="floating-balls-check" caption="示意：一排小球從側面看 (垂直放大 2 倍)。左上是預期，其餘是最常見的三種錯誤" />
+
+| 看到的現象 | 原因通常是 | 回到哪一步 |
+| --- | --- | --- |
+| 小球停在 Y = 0，浪從它身上經過 | `GetSurfaceHeight` 還是只回傳 `transform.position.y`，或 `SO_LakeWater` 沒有指定給 `WaterBody` | [第一步](#第一步：放一顆測試小球)、[第二步](#第二步：把波浪公式照抄成-C#) |
+| 小球在斜坡上懸空 | 沒有反推，或最後用 `target` 取高度 | [第三步](#第三步：反推原始位置) |
+| 小球亂跳 | 反推的正負號反了 | [第三步](#第三步：反推原始位置) |
+| 小球和浪不同步 | `WaveOffset` 和 HLSL 有一行不同 | [第二步](#第二步：把波浪公式照抄成-C#) |
+| 小球完全不動 | 沒按 Play；或小球不在任何一片水面的範圍內 | [第一步](#第一步：放一顆測試小球)、[第四步](#第四步：依位置找出所在的湖) |
+
+**對應 Final Demo**：這一章本身不完成任何一條；它讓 C# 拿到「浮標會跟著波浪上下起伏、左右傾斜」需要的水面高度。
+
+此時你的專案裡，以下檔案應該和教材 GitHub repo 的[範例程式碼](https://github.com/RogelioKG/explain-waterbody/tree/main/urp-water/unity)相同：
+
+- `Assets/Water/Scripts/WaterMesh.cs` (這一章沒有改它)
+- `Assets/Water/Scripts/WaterSettings.cs` (這一章沒有改它)
+- `Assets/Water/Scripts/WaterBody.cs`
+- `Assets/Water/Scripts/WaterHeightProbe.cs` (這一章新增)
+- `Assets/Water/Shaders/GerstnerWaves.hlsl` (這一章沒有改它)
+
+測試小球在你的 Scene 裡，不在 repo 裡。
+
+### 下一步
+
+- 下一章 [Buoyancy](buoyancy.html) 讓物體跟著波浪起伏、傾斜。
+
+### 請回報
+
+以下是官方文件沒有寫清楚、需要你在 Unity 裡看一眼的事：
+
+| # | 去哪裡看 | 回報什麼 |
+| --- | --- | --- |
+| 1 | 每一步改完程式後的 Console | 有沒有紅字，有的話第一行是什麼 |
+| 2 | [第二步](#第二步：把波浪公式照抄成-C#)：Height Scale 2，從側面看斜坡上的小球 | 是否看得出懸空；球底離水面大約多高 (例如半顆球、一顆球的高度) |
+| 3 | [第三步](#第三步：反推原始位置)：Height Scale 2，盯著小球看十幾秒 | 小球是否一直有一部分泡在水裡；有沒有抖動或突然跳一下 |
+| 4 | [第四步](#第四步：依位置找出所在的湖)：Project Settings > Editor > Enter Play Mode Settings | 下拉選單目前的值；連續停止、再按 Play 兩三次，以及改過任何腳本存檔後再按 Play，小球是否每次都跟著浪 |
+
+## 來源
+
+### 官方文件
+
+縮寫：`SR` = `https://docs.unity3d.com/6000.3/Documentation/ScriptReference`，`M` = `https://docs.unity.com/en-us/engine/6000.3/manual` (都是 Unity 6000.3)。
+
+- `Time.time` (FixedUpdate 中回傳 `fixedTime`、Awake 中未定義)：`SR/Time-time.html`；`EditorApplication.timeSinceStartup`：`SR/EditorApplication-timeSinceStartup.html`
+- shader 的 `_Time` 在 URP 對應 `Time.time`：`M/materials-and-shaders/shaders/reference/sl-unity-shader-variables`
+- `Mathf.Sin`、`Mathf.Cos`、`Mathf.Sqrt`：`SR/Mathf.Sin.html`、`SR/Mathf.Cos.html`、`SR/Mathf.Sqrt.html`；兩邊 `sin` 的精度官方文件沒有寫
+- `Vector2.normalized` (太短時回傳零向量)：`SR/Vector2-normalized.html`
+- `Renderer.bounds`、`Renderer.localBounds`、`Mesh.bounds` 是 local space：`SR/Renderer-bounds.html`、`SR/Renderer-localBounds.html`
+- 關掉 Domain Reload 時 static 欄位保留：`M/programming-environment/code-reload-serialization/code-reloading-editor/domain-reloading`；Enter Play Mode Settings：`M/…/configurable-enter-play-mode`
+- `OnEnable`、`OnDisable` 的呼叫時機：`SR/MonoBehaviour.OnEnable.html`、`SR/MonoBehaviour.OnDisable.html`；`[ExecuteAlways]`：`SR/ExecuteAlways.html`
+- 不同物件的 `Update` 先後不能依賴：`M/scripting/managing-update-order/execution-order`
+
+### 數字
+
+- 直接代公式與反推 1~4 次的誤差、mesh 三角形與公式的高度差：用預設的 4 個波 (`WaterSettings` 的預設值) 在 60 × 60 公尺的範圍、隨機時間取樣 20 萬點計算，最大值取整
+- 單一個波的例子 (陡度 0.5、波長 6 公尺) 由公式直接計算
+</script>
+<script>
+explainer({
+  title: 'Wave Height Query',
+  assumes: ['Unity 編輯器的基本操作 (看完 Unity Learn 的 Basic 與 Creative Core)', 'C# 基礎', { t: 'Gerstner Waves (水平位移、陡度上限、多波疊加、WaterSettings 與 WaterBody)', href: 'gerstner-waves.html' }, { t: 'Reflection (做完的湖)', href: 'reflection.html' }, { t: 'URP Waterbody (總覽)', href: 'urp-water.html' }],
+  approach: '重新發明：先讓測試小球停在靜止水面，再照抄波浪公式，由「斜坡上的球懸空」帶出反推原始位置，最後依位置找湖',
+  env: 'Windows 11、Unity 6000.3.20f1 (英文介面)、URP 17.3',
+  terms: {
+    '原始位置': 'vertex 被波浪推動之前，在平面上的水平位置，也就是 Gerstner 公式的輸入 (x₀, z₀)；被推到要查的點 q 的那個 vertex 的原始位置 p 滿足 p + u(p) = q',
+    'fixed-point iteration': '定點迭代：反覆把上一次的結果代回同一個式子，直到代進去和算出來的是同一個值；這一章用 pₙ₊₁ = q − u(pₙ) 反推原始位置',
+    'Domain Reload': '按 Play 時 Unity 重新載入所有 C# 程式，static 欄位回到初始值；可在 Enter Play Mode Settings 關掉',
+  },
+  data: {
+    errBars: {
+      scale: 'log',
+      rows: [
+        { label: '直接代公式', value: 0.453, display: '45 cm', tone: 'cost' },
+        { label: '反推 1 次', value: 0.133, display: '13 cm', tone: 'neutral' },
+        { label: '反推 2 次', value: 0.048, display: '4.8 cm', tone: 'neutral' },
+        { label: '反推 3 次', value: 0.019, display: '1.9 cm', tone: 'neutral' },
+        { label: '反推 4 次', value: 0.0081, display: '8 mm', tone: 'accent' },
+        { label: '畫面上的 mesh 本身', value: 0.0132, display: '1.3 cm', tone: 'f1' },
+      ],
+      caption: 'Height Scale 2 時，查到的高度最多差多少 (對數刻度)。最後一列是 mesh 的三角形和公式的差，當作對照',
+    },
+  },
+});
+</script>
+</body>
+</html>

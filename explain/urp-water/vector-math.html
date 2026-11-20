@@ -1,0 +1,719 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vector Math</title>
+<script src="../_explainer/explainer.js"></script>
+</head>
+<body>
+<script type="text/markdown" id="ex-content">
+## 這一章要解決的問題
+
+### 做水會碰到的五個問題
+
+眼前是一片湖：岸比水面高 1 公尺，水面在 $y = 0$，湖底由淺到深，最深在 $y = -5$；水裡有半泡和沉底的石頭，還有幾條魚。要把這片湖的水畫出來，shader 得一再回答下面五個問題，每個問題背後是一組數學：
+
+| 問題 | 要用的數學 |
+| --- | --- |
+| 湖面上這個點，畫到螢幕上是哪個像素？ | 座標空間與變換矩陣 |
+| 這個像素底下的水有多深？ | depth 的非線性 |
+| 波浪斜的地方，表面朝哪個方向？ | 偏導數與曲面 normal |
+| 細小的波紋怎麼畫上去，還跟著波浪傾斜？ | tangent space |
+| 光碰到水面，往哪裡反彈、往哪裡折進水裡？ | reflection vector 與 refraction vector |
+
+高中的向量、dot (內積)、cross (外積)、三角函數與微分直接拿來用。線性代數的部分當複習寫：從一個直觀的畫面重建，不講定理與證明。每條公式後面接一小段 HLSL (Unity shader 用的程式語言)，看它在程式裡長什麼樣子。
+
+## 湖面上這個點，畫到螢幕上是哪個像素
+
+### 一個點要換四次座標
+
+假設湖裡有一顆沉底的石頭，拿它來看。它是一顆 Sphere，mesh (網格：由頂點和三角形組成的模型形狀) 裡每個 vertex (頂點：mesh 上的角點，存著位置、normal、UV 等資料) 的座標都是相對球心寫的：球心是 (0, 0, 0)，半徑 0.5。這組座標不知道石頭擺在湖的哪裡、被拉長了多少，也不知道攝影機在哪。要知道一個 vertex 落在哪個像素，得一路換座標：
+
+<ex-fig of="vertex-space-chain-to-pixel" caption="一個 vertex 從自己的座標一路換到螢幕上的像素。M、V、P 是三個 4 × 4 矩陣" />
+
+| 空間 | 原點 | 軸 | 手性 | 回答什麼 |
+| --- | --- | --- | --- | --- |
+| [[object space]] | 物件自己的原點 | 物件自己的 $x$、$y$、$z$ 軸 | 左手 | vertex 在 mesh 裡的哪裡 |
+| [[world space]] | 場景的原點 | 整個場景共用，$y$ 向上 | 左手 | vertex 在湖裡的哪裡 |
+| [[view space]] | 攝影機的位置 | $x$ 向右、$y$ 向上、$z$ 向後 (攝影機看向 $-z$) | 右手 | vertex 在攝影機的哪個方向、多遠 |
+| [[clip space]] | 畫面中心 | $x$ 向右、$y$ 向上、$z$ 是深度，另多一個 $w$ | 依平台而定 | 為「遠的東西畫小一點」做準備 |
+| [[NDC]] | 畫面中心 | $x$ 向右、$y$ 向上、$z$ 是深度 | 依平台而定 | vertex 在畫面上的相對位置，畫面內的 $x$、$y$ 在 −1 到 1 之間 |
+
+手性是看這組軸要用左手還是右手比，拇指、食指、中指才分別對上 $+x$、$+y$、$+z$。因為各平台的深度方向不同，有的近處 $z$ 大、有的遠處 $z$ 大，所以 clip space 和 NDC 的手性依平台而定。
+
+前三次換算各是一個矩陣，最後一次是除法。先看矩陣到底在做什麼。
+
+### 矩陣的每一行，是一個軸的落點
+
+先只看轉動與縮放。假設這顆石頭被拉長成 Scale (2, 1, 1.5)，又繞 $y$ 軸轉了一下，轉完後它自己的 $x$ 軸指向世界的 (0.6, 0, 0.8)。
+
+object space 裡的一點 $p = (0.5, 0, 0.5)$，意思是「沿物件的 $x$ 軸走 0.5、沿 $y$ 軸走 0、沿 $z$ 軸走 0.5」。石頭轉了、拉長了，它的三個軸在世界裡的落點跟著變：
+
+- $x$ 軸：方向 (0.6, 0, 0.8)，拉長 2 倍，落在 $X' = (1.2, 0, 1.6)$
+- $y$ 軸：沒動，$Y' = (0, 1, 0)$
+- $z$ 軸：方向轉成和新的 $x$ 軸垂直的 (−0.8, 0, 0.6)，拉長 1.5 倍，落在 $Z' = (-1.2, 0, 0.9)$
+
+走的步數不變，只是改沿新的軸走：
+
+$$p' = 0.5\,X' + 0\,Y' + 0.5\,Z' = (0.6, 0, 0.8) + (-0.6, 0, 0.45) = (0, 0, 1.25)$$
+
+把 $X'$、$Y'$、$Z'$ 直著排成三行 (column)，這個「每個軸乘上步數再相加」就是矩陣乘向量：
+
+$$\begin{pmatrix} 1.2 & 0 & -1.2 \\ 0 & 1 & 0 \\ 1.6 & 0 & 0.9 \end{pmatrix}\begin{pmatrix} 0.5 \\ 0 \\ 0.5 \end{pmatrix} = 0.5\begin{pmatrix} 1.2 \\ 0 \\ 1.6 \end{pmatrix} + 0\begin{pmatrix} 0 \\ 1 \\ 0 \end{pmatrix} + 0.5\begin{pmatrix} -1.2 \\ 0 \\ 0.9 \end{pmatrix}$$
+
+<ex-fig of="matrix-columns-as-basis" caption="從正上方看：往右是 +X、往上是 +Z；Y 軸沒變，省略" />
+
+所以讀一個矩陣，就看它的每一行：第一行是 $x$ 軸的落點，第二行是 $y$ 軸的，第三行是 $z$ 軸的。Unity 的 `Matrix4x4` 也是這樣排：前三行放 $x$、$y$、$z$ 軸。
+
+這種換算叫[[線性變換]] (linear transformation)。它只能把軸轉向、拉長或壓扁，所以原點不動，直線還是直線，等距的格子變成等距的平行四邊形格子 (圖右)。
+
+### 同一個點的兩種說法：換底
+
+$p = (0.5, 0, 0.5)$ 和 $p' = (0, 0, 1.25)$ 是同一個點，只是用不同的軸描述：前者用石頭自己的軸，後者用世界的軸。用矩陣把一組軸上的描述換成另一組軸上的描述，叫[[換底]] (change of basis)。
+
+object → world 是換底，world → view 也是：view space 用的是攝影機自己的軸。
+
+### 反過來算：反矩陣
+
+有時要反過來：已知 world position (世界座標：在 world space 裡的位置)，求它在石頭自己的軸上是多少。這要把剛才的換算整個退回去，做這件事的矩陣叫[[反矩陣]]，寫作 $M^{-1}$。先做 $M$ 再做 $M^{-1}$，等於什麼都沒做：
+
+$$M^{-1}M = I$$
+
+$I$ 是單位矩陣，三行就是原本的三個軸 (1, 0, 0)、(0, 1, 0)、(0, 0, 1)，乘任何向量都不變。
+
+只有縮放時最好懂：Scale (2, 1, 1.5) 把三個軸各拉長 2、1、1.5 倍，反矩陣就是各縮回 1/2、1、1/1.5：
+
+$$\begin{pmatrix} 2&0&0\\0&1&0\\0&0&1.5\end{pmatrix}^{-1} = \begin{pmatrix} 0.5&0&0\\0&1&0\\0&0&0.667\end{pmatrix}$$
+
+Unity 在 shader 裡兩個方向的矩陣都準備好了，不必自己求：`UNITY_MATRIX_M` 是 object → world，`UNITY_MATRIX_I_M` 是 world → object (`I` 代表 inverse，反矩陣)。
+
+### 只有轉動時，反矩陣就是 transpose
+
+只轉動、不縮放時，三個軸都是長度 1 而且互相垂直，這樣的一組軸叫正交基底 (orthonormal basis)。這時反矩陣有捷徑。
+
+只看轉動，石頭的三個軸是 $X' = (0.6, 0, 0.8)$、$Y' = (0, 1, 0)$、$Z' = (-0.8, 0, 0.6)$。世界的一個方向 $v$ 在石頭的 $x$ 軸上走了幾步？因為 $X'$ 長度是 1，dot 就是 $v$ 在 $X'$ 上的投影長度 $v \cdot X'$。三個軸各 dot 一次：
+
+$$v_{\text{object}} = (v \cdot X',\ v \cdot Y',\ v \cdot Z')$$
+
+拿世界的正前方 $v = (0, 0, 1)$ 試：得到 (0.8, 0, 0.6)。驗算：$0.8\,X' + 0.6\,Z' = (0.48 - 0.48,\ 0,\ 0.64 + 0.36) = (0, 0, 1)$，回到 $v$。
+
+三個 dot 寫成矩陣，是把 $X'$、$Y'$、$Z'$ 改成橫著排 (列，row)。原本的矩陣把它們直著排，所以反矩陣就是把原矩陣沿對角線翻過來，這叫 [[transpose]] (轉置：沿對角線翻轉)，寫作 $R^{T}$：
+
+$$R = \begin{pmatrix} 0.6&0&-0.8\\0&1&0\\0.8&0&0.6\end{pmatrix},\qquad R^{-1} = R^{T} = \begin{pmatrix} 0.6&0&0.8\\0&1&0\\-0.8&0&0.6\end{pmatrix}$$
+
+transpose 只是搬位置，不用計算。有縮放時不能直接這樣做：要先用 transpose 把轉動退回去，再把縮放除回去。
+
+### 平移放不進 3 × 3：homogeneous coordinates
+
+這顆石頭不在原點，假設它的 Position 是 (14, −2.4, 2) (相對湖心的 `Lake`；為了好算，假設 `Lake` 就在世界原點)。所以 $p$ 最後應該落在 $(0, 0, 1.25) + (14, -2.4, 2) = (14, -2.4, 3.25)$。
+
+3 × 3 矩陣做不到：它乘 (0, 0, 0) 永遠得到 (0, 0, 0)，原點搬不動。解法是替每個點多加一個分量 $w = 1$，矩陣也多一行一列：
+
+$$\begin{pmatrix} 1.2&0&-1.2&14\\0&1&0&-2.4\\1.6&0&0.9&2\\0&0&0&1\end{pmatrix}\begin{pmatrix} 0.5\\0\\0.5\\1\end{pmatrix} = \begin{pmatrix} 14\\-2.4\\3.25\\1\end{pmatrix}$$
+
+照「每一行乘上對應的分量再相加」來讀：前三行照舊，第四行乘的是 $w = 1$，所以原封不動加進來，它就是平移量。這種多一個分量的寫法叫 [[homogeneous coordinates]] (齊次座標：多一個 w 分量的座標)；轉動、縮放再加上平移，合稱[[仿射變換]] (affine transformation)。Unity 的 `Matrix4x4` 把平移放在最後一行，指的就是這一行。
+
+方向 ([[normal]]、光的方向) 不該被平移：「往上」搬到哪裡都是往上。所以方向的 $w$ 寫 0，第四行乘上 0 就不會加進來。
+
+URP 把 object → world 寫成這樣：
+
+```hlsl com.unity.render-pipelines.core/ShaderLibrary/SpaceTransforms.hlsl TransformObjectToWorld()
+float3 TransformObjectToWorld(float3 positionOS)
+{
+    return mul(GetObjectToWorldMatrix(), float4(positionOS, 1.0)).xyz;
+}
+```
+
+HLSL 第一次出現，這幾個寫法和 C# 不同：
+
+- `float3`、`float4`：3 個、4 個 float 組成的向量
+- `float4(positionOS, 1.0)`：在 3 個分量後面補上 $w = 1$
+- `mul(M, v)`：矩陣乘向量，向量放右邊，和上面的式子同一個順序
+- `.xyz`：取前三個分量，丟掉 $w$
+- `GetObjectToWorldMatrix()`：回傳 `UNITY_MATRIX_M`
+
+變數名稱的結尾標出它在哪個空間：`OS` 是 object space，`WS` 是 world space，`VS` 是 view space，`CS` 是 clip space。
+
+Shader Graph 裡做這類換算的是 Transform node：選 From、To 兩個空間，Type 選 Position (會套用平移) 或 Direction (不套用)。
+
+### 攝影機眼中的湖：view space
+
+world → view 是同一套做法：攝影機也是一個物件，有自己的位置和三個軸。先套用「攝影機的 object → world」的反矩陣，就換到攝影機自己的座標。攝影機只會移動和轉動、不縮放，所以轉動的部分用 transpose 就好。Unity 把整個 world → view 的矩陣叫 `UNITY_MATRIX_V`。
+
+不過 `UNITY_MATRIX_V` 比反矩陣多做一步：把 $z$ 軸翻過來。所以 view space 裡攝影機看向 **$-z$**，和 C# 裡 `transform.forward` 是 $+z$ 相反。攝影機正前方 10 公尺的點，在 view space 的 $z$ 是 −10。
+
+翻了一個軸，手性也跟著反過來：world space 是**左手**座標系，view space 是**右手**座標系。
+
+寫 shader 時，這個正負號會一直出現：view space 的 $z$ 要取負號才是「在攝影機前方多遠」。`LinearEyeDepth` 已經處理過，回傳正的距離。
+
+### 遠的東西比較小：perspective divide
+
+湖裡兩顆一樣高的石頭，一顆離攝影機 10 公尺，一顆 20 公尺，遠的那顆在畫面上只有一半高。
+
+<ex-fig of="perspective-height-vs-distance" caption="從側面看：畫面上的高度和「實際高度 ÷ 距離」成正比" />
+
+圖上兩個相似三角形說明了這件事。view space 的點 $(x, y, z)$ 到攝影機平面的垂直距離是 $-z$ (攝影機看向 $-z$，前方的 $z$ 是負的)，記為 $d$；它是沿視線方向量的距離，不是到攝影機那一點的直線距離。所以畫面上的位置和 $x/d$、$y/d$ 成正比。
+
+**比例常數怎麼定。** 比例關係還缺一個常數。畫面最後要縮成 [[NDC]] (normalized device coordinates)：整個畫面的 $x$、$y$ 各自落在 −1 到 1。不論實際畫面多寬，NDC 一律是這個正方形，寬高不同的部分留到最後換成像素時再補回來。記 NDC 的位置為 $(x_n, y_n)$，比例常數記為 $s_x$、$s_y$：
+
+$$x_n = \frac{s_x\,x}{d}, \qquad y_n = \frac{s_y\,y}{d}$$
+
+常數的值，由「field of view (FOV，視野) 邊緣的點剛好落在 ±1」決定。先看 $y$：FOV 是畫面上下緣之間的夾角 (視野角)，Unity Camera 的 Field of View 就是垂直的。畫面上緣的點，視線和正前方的軸夾 $\text{FOV}/2$，所以它的 $y/d = \tan(\text{FOV}/2)$。要它落在 $y_n = 1$：
+
+$$s_y \cdot \tan(\text{FOV}/2) = 1 \quad\Rightarrow\quad s_y = \frac{1}{\tan(\text{FOV}/2)}$$
+
+再看 $x$。長寬比 $a$ = 實際畫面的寬 ÷ 高 (例如 1920×1080 是 16/9，不是 NDC 的 1)，半寬和半高也是同樣的比例，所以右緣的點 $x/d = a \tan(\text{FOV}/2)$。同樣要它落在 $x_n = 1$：
+
+$$s_x = \frac{1}{a \tan(\text{FOV}/2)} = \frac{s_y}{a}$$
+
+<iframe src="../_diagram/interactive/frustum-to-ndc/index.html" title="攝影機看到的長方形，怎麼變成正方的 NDC 又不變形？" style="height:640px"></iframe>
+
+$s_x / s_y = 1/a$：水平方向看得比較寬，就壓得比較多，才能和垂直方向一起擠進 −1 到 1。
+
+**除以 $d$ 交給誰。** 再看一次要算的式子：
+
+$$x_n = \frac{s_x\,x}{d}, \qquad y_n = \frac{s_y\,y}{d}$$
+
+矩陣能做的是：拿點的 $x$、$y$、$z$ 各乘上固定的數，再相加。$s_x$、$s_y$ 只由 FOV 和長寬比決定，每個點都一樣，可以放進矩陣。那 $d$ 呢？除以 $d$ 就是乘上 $1/d$，而每個點離攝影機的距離不同，等於「乘的數」本身隨點而變，矩陣放不進去。
+
+所以這一步不交給矩陣。GPU 在矩陣之後固定多做一步：把 4 個分量都除以第 4 個分量 $w$，這叫 [[perspective divide]] (透視除法)。矩陣只要把 $s_x\,x$、$s_y\,y$ 放進前兩個分量，並讓 $w$ 等於 $d$，除完就是 $x_n$、$y_n$。於是分兩步：
+
+1. view → clip：投影矩陣 `UNITY_MATRIX_P`
+
+   $$\begin{pmatrix} x_c\\ y_c\\ z_c\\ w_c\end{pmatrix} = \begin{pmatrix} s_x&0&0&0\\0&s_y&0&0\\0&0&A&B\\0&0&-1&0\end{pmatrix}\begin{pmatrix} x\\y\\z\\1\end{pmatrix}$$
+
+   前兩列乘出 $x_c = s_x\,x$、$y_c = s_y\,y$；最後一列 (0, 0, −1, 0) 讓 $w_c = -z = d$，正好是距離。$A$、$B$ 管的是 depth (深度，$z$ 最後變成什麼值)，由 near、far 兩個 [[clipping plane]] (裁切面：垂直於視線、決定可見範圍的平面) 決定，Unity 會算好；它們怎麼來的，在後面[「depth buffer 存的不是距離」](#depth-buffer-存的不是距離)一節推出來。
+
+2. 除以 $w$
+
+   $$\begin{pmatrix} x_n\\ y_n\\ z_n\\ 1\end{pmatrix} = \frac{1}{w_c}\begin{pmatrix} x_c\\ y_c\\ z_c\\ w_c\end{pmatrix} = \begin{pmatrix} s_x\,x/d\\ s_y\,y/d\\ z_c/d\\ 1\end{pmatrix}$$
+
+   GPU 自動做這一步，得到的就是 NDC：畫面內的點，$x_n$、$y_n$ 都落在 −1 到 1 之間。
+
+最後依解析度把 −1 到 1 換成像素位置：$x$ 換成 0 到畫面寬、$y$ 換成 0 到畫面高。兩個方向放大的倍數不同，剛好把前面 $s_x$ 多壓的那 $a$ 倍拉回來，所以畫面不會變形；投影用的 $a$ 若和實際畫面不一致，就會像拉壞的照片。
+
+Shader Graph 的 Screen Position node (Default 模式) 給的是另一種表示法：寬、高各自換成 0 到 1 的比例，左下角是 $(0, 0)$，右上角是 $(1, 1)$。它和 NDC 一樣，只是數值範圍方正，畫面本身還是長方形：在 1920×1080 的畫面上，$x$ 的 0.1 是 192 像素，$y$ 的 0.1 只有 108 像素。所以直接拿它當 UV 貼圖案，圖案會被橫向拉長，要把 $x$ 乘上 $a$ 才不會變形。
+
+```hlsl 示意：world → clip → NDC
+float4 positionCS = TransformWorldToHClip(positionWS);   // 內部是 mul(UNITY_MATRIX_VP, float4(positionWS, 1.0))
+float2 ndc = positionCS.xy / positionCS.w;               // perspective divide；GPU 會自己做，寫出來只為對照
+```
+
+`UNITY_MATRIX_VP` 是 $V$ 和 $P$ 先乘好的一個矩陣。
+
+### 壓扁的石頭：normal 要用 inverse transpose 矩陣
+
+石頭的亮暗由 [[normal]] (法線：垂直於表面、朝外的方向) 決定。normal 也要從 object space 換到 world space，但不能直接乘 $M$。
+
+在 Sphere 側面、$x$ 和 $y$ 都是 0.354 的那一點，normal 朝 45 度：$n = (0.707, 0.707, 0)$；沿著表面的方向是 $t = (-0.707, 0.707, 0)$，兩者 dot 為 0，互相垂直。
+
+這顆石頭的 Scale 是 X 2、Y 1 (Z 的 1.5 不影響這個切面)，$M$ 把 $x$ 乘 2。表面跟著 mesh 變形，表面方向變成 $Mt = (-1.414, 0.707, 0)$。如果 normal 也直接乘 $M$：
+
+$$Mn = (1.414, 0.707, 0), \qquad Mn \cdot Mt = -2 + 0.5 = -1.5 \neq 0$$
+
+不再垂直於表面，光影就會偏。
+
+<ex-fig of="normal-inverse-transpose-scale" caption="從正面看石頭的一個切面。左：原本的球。右：x 拉長兩倍後，直接乘 M 的 normal 歪了" />
+
+要換一個矩陣 $G$ 來算 normal：只要 $Gn$ 和 $Mt$ 還是垂直就對。垂直的意思是 dot 為 0，所以從 dot 開始推。
+
+**第一步：把 dot 寫成矩陣乘法。** 兩個向量的 dot 等於「第一個橫著寫、乘上第二個直著寫」：$a \cdot b = a^{T} b$。例如 $a = (1, 2, 3)$、$b = (4, 5, 6)$，$a^{T}b = 1 \cdot 4 + 2 \cdot 5 + 3 \cdot 6 = 32$，和 dot 一樣。
+
+**第二步：套進要保住的式子。**
+
+$$(Gn) \cdot (Mt) = (Gn)^{T}(Mt) = n^{T}\,G^{T}M\,t$$
+
+最後一個等號用的是：transpose 一個乘積，要把順序反過來，$(Gn)^{T} = n^{T}G^{T}$。可以用大小檢查：$Gn$ 是直的 3 × 1，翻成橫的是 1 × 3；$n^{T}$ 是 1 × 3，$G^{T}$ 是 3 × 3，乘起來 1 × 3，大小對得上；順序不反過來就乘不起來。
+
+**第三步：讓中間的 $G^{T}M$ 消失。** 如果 $G^{T}M = I$ (單位矩陣，乘了等於沒乘)，式子就變成 $n^{T}t = n \cdot t = 0$，原本就垂直，所以不論 $t$ 是表面上哪個方向都成立。$G^{T}M = I$ 的意思是 $G^{T}$ 是 $M$ 的反矩陣：
+
+$$G^{T} = M^{-1} \quad\Rightarrow\quad G = (M^{-1})^{T}$$
+
+這就是 normal 要乘「$M$ 的反矩陣再 transpose」，叫 inverse transpose (反轉置)，寫作 $(M^{-1})^{T}$。
+
+**用例子驗算。** $M$ 把 $x$ 乘 2，所以 $M^{-1}$ 把 $x$ 乘 0.5。只有縮放的矩陣是對角矩陣 (只有對角線上有值)，transpose 後不變，所以 $G$ 也是把 $x$ 乘 0.5，$G^{T}M = I$：
+
+$$(M^{-1})^{T} n = (0.354, 0.707, 0), \qquad (0.354, 0.707, 0) \cdot (-1.414, 0.707, 0) = -0.5 + 0.5 = 0$$
+
+垂直了。
+
+**解讀：inverse transpose 對縮放和轉動各做了什麼。** 把 $M$ 拆成先縮放 $S$、再轉動 $R$ (忽略平移，normal 是方向)，$M = RS$。一步一步算 $(M^{-1})^{T}$：
+
+$$(M^{-1})^{T} = (S^{-1}R^{-1})^{T} = (R^{-1})^{T}(S^{-1})^{T} = R\,S^{-1}$$
+
+- 第一個等號：乘積的反矩陣，順序要反過來，$(RS)^{-1} = S^{-1}R^{-1}$。先做 $S$ 再做 $R$ 的退回方式，是先退 $R$、再退 $S$
+- 第二個等號：乘積的 transpose，順序也反過來，$(S^{-1}R^{-1})^{T} = (R^{-1})^{T}(S^{-1})^{T}$
+- 第三個等號用到兩件事：轉動的反矩陣是 transpose，$R^{-1} = R^{T}$ (前面「只有轉動時，反矩陣就是 transpose」)，所以 $(R^{-1})^{T} = (R^{T})^{T} = R$，翻兩次翻回原樣；縮放是對角矩陣，transpose 不變，$(S^{-1})^{T} = S^{-1}$
+
+結果 $RS^{-1}$：縮放換成相反的 ($S^{-1}$)，轉動照舊 ($R$)。$M$ 把表面往 $x$ 拉長，normal 就往 $x$ 壓短，才能保持垂直。如果只取反矩陣 $M^{-1} = S^{-1}R^{-1}$，轉動也會被反過來，normal 就轉錯方向；再 transpose 一次，轉動才翻回來。上面的例子只有縮放、沒有轉動，所以 transpose 看不出作用。
+
+所以只有轉動 ($S = I$)、或三個方向縮放相同 ($S^{-1}$ 只是整體乘一個數，不改變方向，之後 normalize 就回來) 時，直接乘 $M$ 也對；非均勻縮放就一定要用 inverse transpose。
+
+URP 的寫法：
+
+```hlsl com.unity.render-pipelines.core/ShaderLibrary/SpaceTransforms.hlsl TransformObjectToWorldNormal()
+float3 normalWS = mul(normalOS, (float3x3)GetWorldToObjectMatrix());
+```
+
+- `GetWorldToObjectMatrix()` 回傳反矩陣 `UNITY_MATRIX_I_M`
+- `(float3x3)` 只取左上的 3 × 3，丟掉平移 (normal 是方向)
+- 向量放在 `mul` 的左邊，等於拿矩陣的 transpose 去乘。反矩陣加上 transpose，就是 inverse transpose
+
+函式最後還會把結果 normalize 成長度 1。Shader Graph 的 Transform node，輸入是表面 normal 時 Type 選 Normal。
+
+## 這個像素底下的水有多深
+
+### depth buffer：每個像素記下最近的東西的遠近
+
+淺水要透明、深水要暗，畫水面的每個像素時都得知道：這裡的水有多深？水面底下是湖底，湖底已經先畫好了，問題是怎麼知道它在哪。
+
+畫面上的每個像素，GPU 除了記顏色，還記下目前畫在這裡、最近的東西的遠近，這張表叫 [[depth buffer]]。記的是一個代表遠近的數，不是距離本身，但拿兩個數一比，就知道誰近誰遠。之後再畫別的東西時，比記錄還遠的像素就不畫，石頭才會擋住後面的岸。
+
+湖底、石頭、魚這些 opaque (不透明：先畫、會寫 depth) 的東西先畫完，depth buffer 裡就記著它們的遠近。URP 可以把它複製成一張 texture (貼圖：存著顏色或資料的圖片) 給水的 shader 讀，叫 depth texture (在 URP Asset 勾選 Depth Texture)。畫水面某個像素時，讀 depth texture 的同一個位置，就拿到水面後面湖底的遠近值。
+
+算水深卻需要以公尺計的距離。這個遠近值只能比大小，不能直接當距離用：它怎麼來、和距離是什麼關係，要先弄清楚，才換得回距離。
+
+### depth buffer 存的不是距離
+
+depth buffer 存的值，是[「遠的東西比較小：perspective divide」](#遠的東西比較小：perspective-divide)那兩步裡 $z$ 那一列的結果。把投影矩陣乘開：
+
+$$\begin{pmatrix} x_c\\ y_c\\ z_c\\ w_c\end{pmatrix} = \begin{pmatrix} s_x&0&0&0\\0&s_y&0&0\\0&0&A&B\\0&0&-1&0\end{pmatrix}\begin{pmatrix} x\\y\\z\\1\end{pmatrix} = \begin{pmatrix} s_x\,x\\ s_y\,y\\ Az + B\\ -z\end{pmatrix}$$
+
+上一節只用到前兩列和最後一列，這裡看第三列：$z_c = Az + B$。depth 只看前後，和左右上下無關，所以矩陣裡乘 $x$、$y$ 的位置都是 0，能調的只剩 $A$、$B$ 兩個數。代入 $z = -d$，得 $z_c = B - Ad$。
+
+第二步除以 $w_c = d$ 時，$z_c$ 也一起除，得到上一節矩陣裡的 $z_n = z_c/d$。depth buffer 存的就是這個 $z_n$，GPU 不會另外算距離：
+
+$$z_n = \frac{z_c}{w_c} = \frac{B - A\,d}{d} = \frac{B}{d} - A$$
+
+所以 $z_n$ 不和 $d$ 成正比：不論 $A$、$B$ 怎麼選，它都是「一個數 ÷ $d$」再減一個數，和 $1/d$ 成線性關係。算水深要的是公尺，最方便的是 $z_n$ 和 $d$ 成線性 (例如 $(d - n)/(f - n)$)，讀出來換算一下就是距離。但做不到：$z_n$ 若是「一個數 × $d$ + 一個數」，除以 $d$ 之前的 $z_c$ 就得含 $d^2$，也就是要乘上隨點而變的 $d$，矩陣做不到。所以讀出來的值不能直接當距離用；不過 $z_n$ 和 $d$ 的關係是確定的，下面先求出 $A$、$B$，再在[「換回距離」](#換回距離)一節反解回 $d$。
+
+$A$、$B$ 要由 near 和 far 決定。攝影機只畫 near 到 far 之間的東西：Unity 預設 near = 0.3 公尺、far = 1000 公尺。這是兩個垂直於視線的平面，叫 [[clipping plane]]，比 near 更近、比 far 更遠的都被切掉。所以 $d$ 只會在 near 到 far 之間，depth buffer 的數值範圍就要剛好分給這一段。
+
+注意 $z$ 的範圍和 $x$、$y$ 不同：$x$、$y$ 在 −1 到 1，depth buffer 的值在 0 到 1。Unity 在 Direct3D 上讓近 = 1、遠 = 0 (這個反過來的設計叫 reversed-Z)。記 near 為 $n$、far 為 $f$，要求兩個端點：
+
+$$d = n \;\Rightarrow\; z_n = 1, \qquad d = f \;\Rightarrow\; z_n = 0$$
+
+代進 $z_n = B/d - A$：$B/n - A = 1$、$B/f - A = 0$。第二式給 $A = B/f$，代進第一式得 $B\,(1/n - 1/f) = 1$，所以
+
+$$B = \frac{nf}{f - n}, \qquad A = \frac{n}{f - n}, \qquad z_n = \frac{n}{f - n}\left(\frac{f}{d} - 1\right)$$
+
+用 near = 0.3、far = 1000：$A \approx 0.0003$、$B \approx 0.3001$。各個距離的 $z_n$：
+
+| $d$ (公尺) | $z_n$ |
+| --- | --- |
+| 0.3 | 1 |
+| 1 | 0.2998 |
+| 10 | 0.0297 |
+| 100 | 0.0027 |
+| 1000 | 0 |
+
+$z_n$ 和 $1/d$ 成線性關係，而不是和 $d$。$1/d$ 在近處變得很快、遠處幾乎不動：前 1 公尺 (0.3 到 1) 的值從 1 掉到 0.2998，用掉七成範圍。各個距離落在數值範圍的哪裡：
+
+<ex-fig of="depth-buffer-nonlinear-range" caption="各距離在 depth buffer 數值範圍上的位置，依上式算出 (near 0.3 m、far 1000 m)" />
+
+0.3 到 1 公尺就用掉 70% 的範圍，1 到 1000 公尺只分到 30%，5 公尺以外全擠在最後 6% 裡。近處分得很細，代價是讀出來的值不能直接當距離用。拿兩個像素的 $z_n$ 相減，差 0.01 代表的 $d$ 差多少，要看它們在近處還是遠處：
+
+- 最近處：$z_n$ 從 1 到 0.99，$d$ 從 0.300 到 0.303 公尺，只差約 3 公釐
+- 最遠處：$z_n$ 從 0.01 到 0，$d$ 從約 29 公尺到 1000 公尺，差了將近 1000 公尺
+
+同樣的 0.01，換成距離可以差上幾十萬倍，因為 $z_n$ 跟著 $1/d$ 走：$d$ 越大，$1/d$ 變得越慢，同樣一段 $z_n$ 要涵蓋的距離就越長。這裡比的只是 $d$，也就是沿視線方向到攝影機平面的距離；兩個點左右上下差多遠，$z_n$ 本來就看不出來。
+
+對算水深的影響是：不能拿湖底和水面的 $z_n$ 直接相減，要先各自換回 $d$ 再相減。
+
+### 換回距離
+
+$z_n$ 和 $1/d$ 是線性關係，反過來 $1/d$ 也是 $z_n$ 的線性函數：
+
+$$d = \frac{1}{p\,z_n + q}$$
+
+把上一節的 $z_n = B/d - A$ 解出 $1/d = z_n/B + A/B$，所以 $p = 1/B = (f-n)/(nf)$、$q = A/B = 1/f$，由 near、far 決定。HLSL 有現成的函式：
+
+```hlsl com.unity.render-pipelines.core/ShaderLibrary/Common.hlsl LinearEyeDepth()
+float LinearEyeDepth(float depth, float4 zBufferParam)
+{
+    return 1.0 / (zBufferParam.z * depth + zBufferParam.w);
+}
+```
+
+呼叫時第二個參數傳 Unity 準備好的 `_ZBufferParams`，它的 $z$、$w$ 就是上式的 $p$、$q$。回傳的是沿攝影機前方量的距離，叫 [[eye depth]]，和 clip space 的 $w$ 是同一種距離。
+
+Shader Graph 不必自己算：Scene Depth node 的 Sampling 選 **Eye**，官方說明是「以公尺為單位、離攝影機的距離」。這個 node 只能用在算像素顏色的階段 (fragment)，而且 URP Asset 要勾選 Depth Texture。
+
+水面自己的 eye depth 也拿得到：就是它在 clip space 的 $w$ (Screen Position node 的 Raw 模式給的是除以 $w$ 之前的值，它的 $w$ 分量就是這個)。湖底的 eye depth 減去水面的 eye depth，大約就是視線從水面走到湖底的長度。這個值可以直接拿來決定水的顏色：視線在水裡走得越長，水看起來越深。但它不是水深，下一節說明差在哪裡，以及真正的水深怎麼算。
+
+### 還原湖底那一點的位置
+
+<ex-fig of="view-path-vs-water-depth" caption="示意，水平與垂直同比例" />
+
+水深是從水面垂直往下量的。攝影機從岸上斜斜往下看時，視線在水裡走了 7 公尺才碰到湖底 (上面兩個 eye depth 相減，量到的大約就是這 7 公尺)，但那裡的水只有 3.5 公尺深。eye depth 是沿攝影機前方量的，量不出垂直方向有多深。
+
+垂直方向要看 world space 的 $y$。水面在 $y = 0$，所以只要知道湖底那一點的 world position，水深就是它的 $y$ 取負號。問題變成：怎麼得到這一點的 world position？
+
+這個像素手上有兩個資料。一是它的 screen position (螢幕座標：在畫面上的位置) $(u, v)$，也就是前面 Screen Position node 給的 0 到 1 比例。二是 depth texture 在這裡存的 $z_n$。screen position 決定是哪一條視線，$z_n$ 決定是視線上的哪一點，兩者合起來就確定了湖底那一點。剩下的就是把前面「world → 螢幕」的路倒著走回去。正向是先乘 world → clip 的矩陣 $M_{VP}$ (`UNITY_MATRIX_VP`)，再除以 $w_c$：
+
+$$\begin{pmatrix} x_n\\y_n\\z_n\\1\end{pmatrix} = \frac{1}{w_c}\,M_{VP}\begin{pmatrix} P_{\text{world}}\\1\end{pmatrix}$$
+
+兩邊乘上反矩陣 $M_{VP}^{-1}$ (`UNITY_MATRIX_I_VP`)：
+
+$$M_{VP}^{-1}\begin{pmatrix} 2u-1\\2v-1\\z_n\\1\end{pmatrix} = \frac{1}{w_c}\begin{pmatrix} P_{\text{world}}\\1\end{pmatrix} = \begin{pmatrix} P_{\text{world}}/w_c\\ 1/w_c\end{pmatrix}$$
+
+左邊全是已知：$u$、$v$ 乘 2 減 1 就換回 NDC 的 −1 到 1，$z_n$ 從 depth texture 讀。右邊每個分量都帶著 $1/w_c$，前三個除以第四個就約掉了：
+
+$$\frac{P_{\text{world}}/w_c}{1/w_c} = P_{\text{world}}$$
+
+URP 把這些包成一個函式：
+
+```hlsl com.unity.render-pipelines.core/ShaderLibrary/Common.hlsl ComputeWorldSpacePosition()
+float3 ComputeWorldSpacePosition(float2 positionNDC, float deviceDepth, float4x4 invViewProjMatrix)
+```
+
+| 參數 | 型別 | 用途 |
+| --- | --- | --- |
+| `positionNDC` | `float2` | 這個像素的 screen position，0 到 1 |
+| `deviceDepth` | `float` | depth texture 讀到的值 |
+| `invViewProjMatrix` | `float4x4` | world → clip 的反矩陣，傳 `UNITY_MATRIX_I_VP` |
+
+回傳這個像素上那一點的 world position。內部就是上面的算式 (另外依平台處理了 $y$ 的方向)。
+
+參數名稱雖然叫 `positionNDC`，但 Unity 函式庫說的 NDC 是 0 到 1，不是前面的 −1 到 1；函式內部會自己乘 2 減 1。所以直接傳 screen position $(u, v)$，先換成 −1 到 1 就等於換了兩次。
+
+照官方範例的寫法，算湖底的水深：
+
+```hlsl 示意：由 screen position 與 depth 算出水深 (簡化自官方範例，Windows 上這樣寫即可)
+float2 uv = …;                                      // 這個像素的 screen position，0 到 1
+float depth = SampleSceneDepth(uv);                 // 讀 depth texture
+float3 positionWS = ComputeWorldSpacePosition(uv, depth, UNITY_MATRIX_I_VP);
+float waterDepth = -positionWS.y;                   // 水面在 Y = 0
+```
+
+## 波浪斜的地方，表面朝哪個方向
+
+### 固定一個變數，看另一個方向的斜率
+
+波浪讓水面高低起伏，水面的高度是位置的函數：站在 $(x, z)$，水面高 $h(x, z)$。光照要的是每一點的 normal，所以問題是：已知 $h$，怎麼求 normal？
+
+先找兩條貼著水面的線。以 $h(x, z) = 0.5\sin x + 0.25\sin z$ 為例，看原點 (0, 0) 那一點：
+
+- 固定 $z = 0$，只沿 $x$ 走：水面的剖面是 $0.5\sin x$，在 $x = 0$ 的斜率是 $0.5\cos 0 = 0.5$
+- 固定 $x = 0$，只沿 $z$ 走：剖面是 $0.25\sin z$，斜率是 0.25
+
+<iframe src="../_diagram/interactive/partial-slices/index.html" title="沿 x、沿 z 的兩個剖面，在同一點的斜率各是多少？" style="height:480px"></iframe>
+
+「固定其他變數、只動一個變數時的斜率」叫[[偏導數]] (partial derivative)，寫成 $\partial h/\partial x$、$\partial h/\partial z$。求法和高中的微分一樣，被固定的變數當成常數：對 $x$ 取偏導時，$0.25\sin z$ 是常數，斜率是 0。
+
+沿 $x$ 走一步 ($x$ 加 1)，高度增加 $\partial h/\partial x$，$z$ 不變，所以沿 $x$ 的 tangent (切線：沿著表面的方向) 是：
+
+$$T = \left(1,\ \frac{\partial h}{\partial x},\ 0\right) = (1, 0.5, 0)$$
+
+同理，沿 $z$ 走一步：
+
+$$B = \left(0,\ \frac{\partial h}{\partial z},\ 1\right) = (0, 0.25, 1)$$
+
+### 兩條 tangent cross 得到 normal
+
+$T$ 和 $B$ 都貼著水面，cross 的結果同時垂直於兩者，也就垂直於水面：
+
+$$N = B \times T = \left(-\frac{\partial h}{\partial x},\ 1,\ -\frac{\partial h}{\partial z}\right) = (-0.5, 1, -0.25)$$
+
+順序是 $B \times T$：拿平的水面驗算，$T = (1, 0, 0)$、$B = (0, 0, 1)$，$B \times T = (0, 1, 0)$ 朝上；反過來會朝下。
+
+<iframe src="../_diagram/interactive/cross-normal/index.html" title="T、B 兩條 tangent 做 cross，得到的 normal 朝哪裡？" style="height:480px"></iframe>
+
+$N$ 的長度不是 1 (這裡是 1.146)，光照只要方向，所以最後 normalize 成 (−0.436, 0.873, −0.218)。水面往 $+x$、$+z$ 升高，normal 就往 $-x$、$-z$ 倒，面向下坡那一側。
+
+```hlsl 示意：由兩個偏導數求 normal
+float3 T = float3(1, dhdx, 0);       // 沿 x 的 tangent
+float3 B = float3(0, dhdz, 1);       // 沿 z 的 tangent
+float3 N = normalize(cross(B, T));   // cross 之後 normalize
+```
+
+`cross`、`normalize` 是 HLSL 內建函式，分別是外積與 normalization。
+
+### vertex 也會水平移動時
+
+有些波浪不只讓水面上下動，還讓每個點前後移動 (這樣浪峰會比較尖)。這時要分清兩種位置：點在水面靜止時待的原始位置 $(x_0, z_0)$，相當於點的編號；和它被推動後的實際位置。實際位置是原始位置加上位移：
+
+$$P(x_0, z_0) = \big(x_0 + D_x(x_0, z_0),\ h(x_0, z_0),\ z_0 + D_z(x_0, z_0)\big)$$
+
+$D_x$、$D_z$ 是水平位移，$h$ 是高度，三者都是 $(x_0, z_0)$ 的函數，下面為了簡潔省略參數。這裡的 $h$ 輸入的是原始位置，和上一節輸入實際位置的 $h(x, z)$ 不同；沒有水平位移時兩者才一樣。
+
+tangent 的求法和上面一樣：固定 $z_0$，對 $x_0$ 取偏導。$(x_0, z_0)$ 雖然不是點實際的位置，仍是 $P$ 的輸入；偏導問的是「輸入 $x_0$ 變一點點，輸出的位置 $P$ 變多少」。$P$ 的輸出是向量，照定義寫：
+
+$$\frac{\partial P}{\partial x_0} = \lim_{\varepsilon \to 0} \frac{P(x_0 + \varepsilon,\ z_0) - P(x_0,\ z_0)}{\varepsilon}$$
+
+分子是兩個點相減，向量相減、除以一個數都是逐分量進行，所以向量的偏導就是每個分量各自取偏導。
+
+把 $P$ 拆成原始位置、高度、水平位移三部分：
+
+$$P = (x_0,\ 0,\ z_0) + (0,\ h,\ 0) + (D_x,\ 0,\ D_z)$$
+
+各自對 $x_0$ 取偏導：
+
+- 原始位置 $(x_0, 0, z_0)$：$x_0$ 對 $x_0$ 的偏導是 1；$z_0$ 被固定，偏導是 0，得 $(1, 0, 0)$
+- 高度 $(0, h, 0)$：得 $(0, \partial h/\partial x_0, 0)$
+- 水平位移 $(D_x, 0, D_z)$：得 $(\partial D_x/\partial x_0,\ 0,\ \partial D_z/\partial x_0)$
+
+加起來：
+
+$$T = \frac{\partial P}{\partial x_0} = \left(1 + 0 + \frac{\partial D_x}{\partial x_0},\ \ 0 + \frac{\partial h}{\partial x_0} + 0,\ \ 0 + 0 + \frac{\partial D_z}{\partial x_0}\right) = \left(1 + \frac{\partial D_x}{\partial x_0},\ \frac{\partial h}{\partial x_0},\ \frac{\partial D_z}{\partial x_0}\right)$$
+
+同理，$B = \partial P/\partial z_0$，normal 一樣是 $N = B \times T$。
+
+沒有水平位移時 ($D_x = D_z = 0$)，第三部分是 0，只剩前兩部分相加，就是上面的 $(1, \partial h/\partial x, 0)$：前面的寫法是這個通則的特例。
+
+## 細小的波紋：tangent space
+
+### texture 裡的方向，是相對於表面
+
+水面 mesh 每格 0.3 公尺，幾公分大的細波紋做不出來。改把它畫在 [[normal map]] (法線貼圖) 裡：每個像素存一個 normal 方向，只改變光影，不移動 mesh。
+
+問題是：texture 裡的方向是相對什麼？水面隨波浪傾斜，texture 不知道。
+
+<iframe src="../_diagram/interactive/tangent-space/index.html" title="同一個 texture 值放在平面和斜坡上，換到 world space 之後各指向哪裡？" style="height:640px"></iframe>
+
+normal map 存的是 $n_{\text{tangent}}$，兩邊共用同一個。把它直接當 world 方向畫，只有平面上對；換到 world space 的 $n_{\text{world}}$ 在兩邊指向不同，但偏離各自表面 normal $N$ 的角度一樣。
+
+所以 $n_{\text{tangent}}$ 是相對於表面的方向：(0, 0, 1) 正對表面外面，$x$、$y$ 是往表面上兩個方向傾斜多少。圖裡貼著表面的 $T$、$B$ 和朝外的 $N$ 就是這組軸，叫 [[tangent space]] (切線空間：以表面自己為基準的座標系)：
+
+| 軸 | 指向 |
+| --- | --- |
+| $T$ (tangent) | 和 $N$ 垂直 (貼著表面)，指向 texture $u$ 增加的方向 |
+| $B$ (bitangent) | 和 $N$ 垂直 (貼著表面)，指向 texture $v$ 增加的方向 |
+| $N$ (normal) | 表面的 normal |
+
+mesh 的每個 vertex 存了 $N$ 和 $T$，$T$ 由周圍三角形的 UV 推出來；$B$ 由 cross 算出來：$B$ 是 $N$ 和 $T$ 的 cross 再乘上 `tangent.w` (1 或 −1，需要時把 $B$ 翻面)。
+
+vertex 只有幾個，像素卻很多。rasterization (光柵化：找出三角形蓋住哪些像素) 時，三角形三個 vertex 的 $N$、$T$、UV 會 interpolate (插值：依三個 vertex 的值按比重算出中間的值) 到三角形裡的每個像素，所以每個像素都有自己的一組 $T$、$B$、$N$，在三角形之間平滑變化。normal map 則用 interpolation 後的 UV，每個像素各讀一次。vertex 只決定這組軸朝哪裡，波紋能多細看的是 texture：一個三角形裡可以放下好幾個 texel (貼圖上的一格) 的波紋。
+
+### 轉回 world space：T、B、N 就是三個軸的落點
+
+光照拿 normal 和指向光源的方向 $L$ 做 dot，兩者要在同一套座標裡，但 $L$ 是 world space 的量。平的水面、太陽在正上方，$L = (0, 1, 0)$，$n_{\text{tangent}} = (0, 0, 1)$：
+
+- 直接用 $n_{\text{tangent}}$：$(0, 0, 1) \cdot L = 0$，像光從側面掠過，錯
+- 用 $n_{\text{world}} = (0, 1, 0)$：$n_{\text{world}} \cdot L = 1$，正對太陽
+
+所以先把 $n_{\text{tangent}} = (x, y, z)$ 換到 world space (URP 的做法；反過來把 $L$ 換進 tangent space 也行)。這是換底，$T$、$B$、$N$ 是三個軸在世界裡的方向：
+
+$$n_{\text{world}} = \underbrace{\begin{pmatrix} T & B & N \end{pmatrix}}_{M_{\text{TBN}}}\begin{pmatrix} x\\y\\z \end{pmatrix} = x\,T + y\,B + z\,N$$
+
+互動圖的讀數就是這條式子。讀數最後一行是 world 座標 (Unity 的 $Y$ 朝上)，平面的 $T$、$B$、$N$ 是 $X$、$Z$、$Y$ 軸，所以平面上得到 $(x, z, y)$。
+
+$T$、$B$、$N$ 長度都是 1、互相垂直 (正交基底)，所以反方向用 transpose：
+
+$$n_{\text{tangent}} = M_{\text{TBN}}^{T}\, n_{\text{world}}$$
+
+URP 的寫法 (取自 `SpaceTransforms.hlsl` 的 `CreateTangentToWorld` 與 `TransformTangentToWorld`)：
+
+```hlsl 示意：tangent space → world space
+float3x3 tangentToWorld = float3x3(tangent, bitangent, normal);
+float3 normalWS = mul(normalTS, tangentToWorld);
+```
+
+`float3x3(T, B, N)` 把三軸橫放成三列，是 $M_{\text{TBN}}^{T}$，所以向量改放 `mul` 左邊：
+
+$$n_{\text{tangent}}^{T}\, M_{\text{TBN}}^{T} = (M_{\text{TBN}}\, n_{\text{tangent}})^{T} = n_{\text{world}}^{T}$$
+
+### texture 的顏色怎麼變成向量
+
+$n_{\text{tangent}}$ 的分量在 −1\~1，texture 的每個 channel (通道：顏色的其中一個分量，例如 R) 卻只能存 0\~1。
+
+<iframe src="../_diagram/interactive/normal-map-color/index.html" title="normal 的方向怎麼存成 texture 的顏色？為什麼 normal map 大多是淡藍紫色？" style="height:720px"></iframe>
+
+存的時候把每個分量 $v$ 換成顏色 $c$，讀回來再換回去：
+
+$$c = \frac{v + 1}{2} \qquad v = 2c - 1$$
+
+| 分量 | 沿著 | 向量的範圍 | 存進的 channel | 顏色的範圍 |
+| --- | --- | --- | --- | --- |
+| $x$ | $T$ | −1\~1 | R | 0\~1 |
+| $y$ | $B$ | −1\~1 | G | 0\~1 |
+| $z$ | $N$ | 0\~1 (朝表面外，不會是負的) | B | 0.5\~1 |
+
+$z$ 不會是負的，B 至少 0.5；波紋大多只稍微傾斜，R、G 落在 0.5 附近。所以沒有傾斜的 (0, 0, 1) 存成 (0.5, 0.5, 1)，normal map 大多是淡藍紫色；往 $T$ 傾斜的坡面偏紅或偏青，往 $B$ 傾斜的偏綠或偏紫。
+
+Unity 預設的格式更省：只存 $x$、$y$ 兩個分量，$z$ 由「長度是 1」重建，$z = \sqrt{1 - x^2 - y^2}$。這些 Shader Graph 會代勞：Sample Texture 2D node 的 Type 設成 Normal，輸出的就是解開後的向量。
+
+### 兩張 normal map 怎麼疊
+
+水面的細波紋通常用兩張 normal map 往不同方向捲動，疊起來才看不出重複。疊法不能取平均。
+
+[「波浪斜的地方」](#波浪斜的地方，表面朝哪個方向)那一節看過，normal 的傾斜來自高度的斜率：$N$ 正比於 $(-\partial h/\partial x,\ 1,\ -\partial h/\partial z)$。兩層波紋疊在一起，高度相加，斜率也相加。所以兩張 normal 疊起來應該比各自都陡，而平均會讓它變平。
+
+例：$n_1 = (0.6, 0, 0.8)$ 往 $T$ 方向斜 37 度，$n_2 = (0, 0.6, 0.8)$ 往 $B$ 方向斜 37 度。
+
+- 平均再 normalize：(0.331, 0.331, 0.883)，只斜 28 度，比任何一張都平
+- $x$、$y$ 相加，$z$ 相乘，再 normalize：(0.6, 0.6, 0.64) → (0.565, 0.565, 0.602)，斜 53 度
+
+後者是 Shader Graph 的 Normal Blend node Default 模式的算式，是「斜率相加」的簡便近似：
+
+```hlsl Shader Graph Normal Blend node (Default 模式) 的生成碼
+Out = normalize(float3(A.rg + B.rg, A.b * B.b));
+```
+
+$x$、$y$ 相加把兩層的傾斜疊起來；$z$ 相乘讓兩張都是 (0, 0, 1) 時結果仍是 (0, 0, 1)。`.rg`、`.b` 和 `.xy`、`.z` 是同樣的分量，只是用顏色的名字。兩個輸入都要是解開後的向量 (Type 設成 Normal 的 Sample Texture 2D 的輸出)。node 的另一個模式 Reoriented 把第二張的方向轉到第一張的表面上，比較精確，算式較長。
+
+## 光碰到水面，往哪裡去
+
+### 反射：把垂直於水面的那一半翻過來
+
+站在岸上看湖，視線往下 30 度碰到水面，水面像鏡子一樣映出倒影。倒影是從哪個方向來的？
+
+<ex-fig of="reflection-refraction-angles" caption="從側面看。i 是視線 (從攝影機指向水面)，n 是 normal" />
+
+設視線方向 $i$ (從攝影機指向水面，長度 1)，水面的 normal $n$ (長度 1)。把 $i$ 拆成兩部分：
+
+- 沿著 $n$ 的部分：$(i \cdot n)\,n$
+  > $|i|\cos\theta \, \dfrac{n}{|n|} = (i \cdot n)\,n$
+- 貼著水面的部分：$i - (i \cdot n)\,n$
+  > 折射的[「寫成向量」](#寫成向量)會再用到
+
+反射時：
+
+- 貼著水面的部分不變：$i - (i \cdot n)\,n$
+- 沿著 $n$ 的部分反向：$-(i \cdot n)\,n$
+
+兩者相加：
+
+$$r = i - 2\,(i \cdot n)\,n$$
+
+例：$i = (\cos 30°, -\sin 30°, 0) = (0.866, -0.5, 0)$，平靜的水面 $n = (0, 1, 0)$。$i \cdot n = -0.5$，所以 $r = (0.866, -0.5, 0) + (0, 1, 0) = (0.866, 0.5, 0)$：往上 30 度，倒影是那個方向的天空。
+
+```hlsl 示意：反射
+float3 r = reflect(i, n);   // HLSL 內建，算式就是 i - 2 * n * dot(i, n)
+```
+
+Shader Graph 的 Reflection node 做同一件事 (輸入 In 與 Normal)。$i$ 的方向是「從攝影機指向表面」。Unity 有些函式給的方向是反過來的，例如 `GetWorldSpaceViewDir` 回傳從表面指向攝影機的方向，要先加負號。
+
+### 折射：Snell 定律
+
+光從空氣進入水會偏折，照高中物理的 Snell 定律：
+
+$$n_1 \sin\theta_1 = n_2 \sin\theta_2$$
+
+$\theta_1$、$\theta_2$ 是入射、折射方向和 normal 的夾角；$n_1$、$n_2$ 是兩邊的[[折射率]] (index of refraction，IOR)，空氣約 1.0，水約 1.33。同一條視線和 normal 夾 60 度：$\sin\theta_2 = \sin 60° / 1.33 = 0.651$，$\theta_2 = 40.6°$。折進水裡的視線比較陡，所以從岸上看，水底的石頭看起來比實際淺。
+
+### 寫成向量
+
+shader 要的是方向向量，不是角度。先定好兩個符號：
+
+- $\eta = n_1 / n_2$
+- $c = -\,i \cdot n = \cos\theta_1$
+  > $i$ 朝水裡、$n$ 朝上，兩者長度都是 1，所以 $i \cdot n = -\cos\theta_1$
+
+折射方向 $t$ 也取長度 1，用和反射一樣的拆法：
+
+- 貼著水面的部分：$\eta\,(i + c\,n)$
+  > $i$ 貼著水面的部分是 $i - (i \cdot n)\,n = i + c\,n$，長度 $\sin\theta_1$
+  >
+  > Snell 定律讓長度變成 $\sin\theta_2 = \eta\sin\theta_1$，方向不變
+- 沿著 normal 的部分：$-\sqrt{k}\,n$，$k = 1 - \eta^2(1 - c^2)$
+  > 方向朝水裡 ($-n$)
+  >
+  > $t$ 長度 1，所以長度是 $\cos\theta_2 = \sqrt{1 - \sin^2\theta_2}$
+  >
+  > $= \sqrt{1 - \eta^2\sin^2\theta_1} = \sqrt{1 - \eta^2(1 - c^2)}$
+
+兩者相加：
+
+$$t = \eta\,(i + c\,n) - \sqrt{k}\,n = \eta\, i + \left(\eta c - \sqrt{k}\right) n$$
+
+代入上例：$\eta = 1/1.33 = 0.752$、$c = 0.5$、$k = 0.576$、$\sqrt{k} = 0.759$：
+
+$$t = 0.752\,(0.866, -0.5, 0) + (0.376 - 0.759)\,(0, 1, 0) = (0.651, -0.759, 0)$$
+
+$x$ 分量 0.651 正是 $\sin 40.6°$，和用角度算的一致。
+
+```hlsl 示意：折射
+float eta = 1.0 / 1.33;                         // n1 / n2：從空氣進入水
+float c = -dot(i, n);
+float k = 1.0 - eta * eta * (1.0 - c * c);
+float3 t = eta * i + (eta * c - sqrt(k)) * n;
+```
+
+Shader Graph 的 Refract node：Incident 接 $i$、Normal 接 $n$，IOR Source 填光原本所在的介質 (空氣 1)，IOR Medium 填要進入的介質 (水 1.33)，Refracted 輸出 $t$。
+
+### 從水下往上看：全反射
+
+潛到水下往上看，光的路線倒過來：從水 ($n_1 = 1.33$) 進入空氣 ($n_2 = 1$)，$\sin\theta_2 = 1.33 \sin\theta_1$。$\theta_1$ 大到 $1.33\sin\theta_1 > 1$ 時，沒有角度滿足 Snell 定律：光完全不進入空氣，整個反射回水裡。這叫[[全反射]] (total internal reflection)，開始發生的角度叫臨界角：
+
+$$\sin\theta_c = \frac{n_2}{n_1} = \frac{1}{1.33}, \qquad \theta_c = 48.8°$$
+
+在向量式裡，這時 $k < 0$，$\sqrt{k}$ 不存在。程式要先檢查 $k$，小於 0 就改用反射。Refract node 的 Mode 有兩種處理：Safe 回傳零向量，CriticalAngle 改回傳反射方向。
+
+<ex-fig of="snell-window-total-reflection" caption="從水下往上看。圓錐內的視線穿出水面，圓錐外的被全反射" />
+
+所以從水下往上看，只有正上方 48.8 度以內看得到水面上的世界，整片天空擠在這個圓錐裡；圓錐外的水面像鏡子，映出湖底和魚。
+
+從水下算時，normal 要翻成朝下 (朝向視線來的那一側)，上面的式子才成立：它假設 $c = -\,i \cdot n$ 是正的。
+
+## 回頭看
+
+### 接回開頭的問題
+
+| 問題 | 答案 |
+| --- | --- |
+| 湖面上這個點，畫到螢幕上是哪個像素？ | 用三個 4 × 4 矩陣從 object 換到 world、view、clip，再除以 $w$ (距離) 得到 NDC。矩陣的每一行是一個軸的落點，第四行是平移；只有轉動時反矩陣是 transpose；normal 要用 inverse transpose |
+| 這個像素底下的水有多深？ | depth texture 的值 $z_n$ 和 1 / 距離成線性關係；換回距離 (公尺) 用 `LinearEyeDepth` 或 Scene Depth 的 Eye 模式；要真正的水深，用反矩陣還原湖底那一點的 world position |
+| 波浪斜的地方，表面朝哪個方向？ | 對 $x$、$z$ 各取偏導得到兩條 tangent $T$、$B$，$N = B \times T$ |
+| 細小的波紋怎麼畫上去，還跟著波浪傾斜？ | normal map 存 tangent space 的方向，用 $T$、$B$、$N$ 當三個軸換到 world space；兩張疊加時把傾斜相加，不取平均 |
+| 光碰到水面，往哪裡反彈、往哪裡折進水裡？ | 反射 $r = i - 2(i \cdot n)n$；折射照 Snell 定律縮放貼著水面的部分；從水下看，超過 48.8 度就全反射 |
+
+### 下一步
+
+下一章 [Shader Basics](shader-basics.html)：一幀畫面怎麼畫出來，shader 怎麼決定每個 vertex 的位置、每個像素的顏色。
+
+## 來源
+
+### 官方文件與原始碼
+
+縮寫：`S` = `https://docs.unity3d.com/6000.3/Documentation/ScriptReference`，`M` = `https://docs.unity.com/en-us/engine/6000.3/manual`，`SG` = `https://docs.unity3d.com/Packages/com.unity.shadergraph@17.3/manual`，`GFX` = `https://raw.githubusercontent.com/Unity-Technologies/Graphics/6000.3/staging/Packages`，`MS` = `https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl`。
+
+- 矩陣的行放軸、平移在最後一行：`S/Matrix4x4.html`
+- view space 看向 $-z$：`S/Camera-worldToCameraMatrix.html`
+- world space 的 left hand rule：`S/Vector3.Cross.html`
+- view space 是右手座標系：`GFX/com.unity.render-pipelines.core/ShaderLibrary/Common.hlsl` (`ComputeViewSpacePosition` 的註解)
+- 各平台的深度方向 (`UNITY_REVERSED_Z`)：`S/SystemInfo-usesReversedZBuffer.html`、`GFX/com.unity.render-pipelines.core/ShaderLibrary/API/D3D11.hlsl`
+- 投影矩陣與 `UNITY_MATRIX_P`：`S/GL.GetGPUProjectionMatrix.html`
+- 矩陣巨集 (`UNITY_MATRIX_M`、`UNITY_MATRIX_I_M`、`UNITY_MATRIX_V`、`UNITY_MATRIX_VP`、`UNITY_MATRIX_I_VP`)：`GFX/com.unity.render-pipelines.universal/ShaderLibrary/Input.hlsl`
+- 變換函式、normal 的變換、TBN：`GFX/com.unity.render-pipelines.core/ShaderLibrary/SpaceTransforms.hlsl`
+- `LinearEyeDepth`、`ComputeWorldSpacePosition`：`GFX/com.unity.render-pipelines.core/ShaderLibrary/Common.hlsl`
+- normal map 的解碼：`GFX/com.unity.render-pipelines.core/ShaderLibrary/Packing.hlsl`
+- 由 depth 還原 world position 的官方範例：`M/materials-and-shaders/shaders/writing-custom-shaders-urp/writing-shaders-urp/reconstruct-world-position.md`
+- `GetWorldSpaceViewDir` 的方向：URP 手冊 Use built-in shader methods 的 transformations 頁 (`M/…/use-built-in-shader-methods/transformations.md`)
+- `Mesh.tangents`：`S/Mesh-tangents.html`
+- node：`SG/Transform-Node.html`、`SG/Screen-Position-Node.html`、`SG/Scene-Depth-Node.html`、`SG/Normal-Blend-Node.html`、`SG/Normal-Unpack-Node.html`、`SG/Reflection-Node.html`、`SG/Refract-Node.html`
+- HLSL 內建函式：`MS/dx-graphics-hlsl-reflect`
+</script>
+<script>
+explainer({
+  title: 'Vector Math',
+  assumes: ['高中數學：向量、dot、cross、三角函數、微分', '線性代數修過即可，不熟沒關係', { t: 'URP Waterbody (總覽)', href: 'urp-water.html' }],
+  approach: '重新發明：每個概念從眼前這片湖的一個問題開始，推到需要的數學',
+  terms: {
+    'object space': '相對於物件自己原點與軸的座標；mesh 的 vertex 存的就是它',
+    'world space': '整個場景共用的座標，Y 向上，單位公尺',
+    'view space': '以攝影機為原點、用攝影機自己的軸的座標；攝影機看向 −Z',
+    'clip space': '投影矩陣的輸出，4 個分量；w 是到攝影機平面的垂直距離',
+    'NDC': 'perspective divide 之後的座標，畫面內的 x、y 都在 −1 到 1；不論畫面長寬比，一律是正方形',
+    '線性變換': '把軸轉向、拉長或壓扁的換算；矩陣的每一行是一個軸的落點',
+    '換底': '把一組軸上的描述換成另一組軸上的描述',
+    '反矩陣': '把一個矩陣的換算整個退回去的矩陣',
+    'transpose': '把矩陣沿對角線翻過來，行變成列；正交基底的反矩陣就是它',
+    'homogeneous coordinates': '多加一個分量 w 的寫法；位置的 w 是 1 會被平移，方向的 w 是 0 不會',
+    '仿射變換': '線性變換再加上平移',
+    'clipping plane': '垂直於視線的兩個平面，near 與 far；比 near 近、比 far 遠的東西不畫',
+    'perspective divide': '把 clip space 的 4 個分量都除以 w，遠的東西因此變小',
+    'normal': '垂直於表面、朝外的方向，光照用它決定亮暗',
+    'depth buffer': '每個像素記下目前最近的東西的遠近；存的不是距離，而是和 1 / 距離成線性關係的數',
+    'eye depth': '沿攝影機前方量的距離，單位公尺',
+    '偏導數': '固定其他變數、只動一個變數時的斜率',
+    'normal map': '每個像素存一個 normal 方向的 texture，畫出 mesh 做不出的細節',
+    'tangent space': '以表面為準的軸：T、B 貼著表面，N 是 normal',
+    '折射率': '光在介質裡變慢的倍數；空氣約 1.0，水約 1.33',
+    '全反射': '從折射率大的一邊射向小的一邊、角度超過臨界角時，光完全反射回來',
+  },
+});
+</script>
+</body>
+</html>

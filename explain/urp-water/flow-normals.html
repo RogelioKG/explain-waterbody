@@ -1,0 +1,647 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flow Normals</title>
+<script src="../_explainer/explainer.js"></script>
+</head>
+<body>
+<script type="text/markdown" id="ex-content">
+## 這一章要解決的問題
+
+### 大波浪之間，水面平滑得像塑膠
+
+做完 [Depth Coloring](depth-coloring.html)，湖面會起伏、看得出深淺，岸邊有泡沫。但大波浪之間的水面完全平滑：光影只跟著幾公尺長的大波浪變，沒有真的水面上那種一直在動的細碎波紋。mesh 每格 0.3 公尺，比這些波紋還粗，沒辦法靠移動 vertex 做出來。
+
+這一章不動 mesh，只改每個像素的 normal。做完後，太陽在水面上的反光碎成許多閃動的小亮點，波紋往兩個方向緩慢漂移、貼著大波浪的坡面，遠處的水面像鏡子一樣平滑。新參數和波浪一樣放在設定資產 `SO_LakeWater` 裡；兩層波紋共用一個 Sub Graph `SSG_Ripple_Layer`。
+
+### 這一章怎麼走
+
+| 步驟 | 做什麼 | 接下來要處理的 |
+| --- | --- | --- |
+| [第一步](#第一步：讓-specular-出現) | 用 Smoothness 讓太陽的 specular highlight 出現 | specular 是一條光滑的亮帶，像塑膠 |
+| [第二步](#第二步：一層細波紋) | 用 normal map 加一層細波紋 | 這些 normal 是相對於什麼方向？ |
+| [第三步](#第三步：細波紋怎麼貼著大波浪) | 細波紋怎麼貼著大波浪；mesh 補上 tangent | 整片波紋往同一個方向滑，像一張紙；看得出重複 |
+| [第四步](#第四步：第二層波紋) | 加第二層波紋，兩層混合 | 遠處還留著糊掉的波紋 |
+| [第五步](#第五步：遠處的波紋淡掉) | 遠處的波紋淡掉 | 新參數只在 Material 上 |
+| [第六步](#第六步：把新參數搬進設定資產) | 參數搬進設定資產 | 第二層是第一層的複製，同一套算法放了兩份 |
+| [第七步](#第七步：把一層波紋收成-Sub-Graph) | 把一層波紋收成 Sub Graph，兩層共用 | |
+
+[第一步](#第一步：讓-specular-出現)到[第六步](#第六步：把新參數搬進設定資產)之後都有「現在應該看到」、預期與常見錯誤並排的示意圖和對照表。[第七步](#第七步：把一層波紋收成-Sub-Graph)只整理 graph，只有「現在應該看到」。示意圖大多是攝影機壓低、面向太陽看水面，白色是 specular。
+
+## 第一步：讓 specular 出現
+
+### 先把太陽轉到低角度
+
+細波紋改變的主要是反光，要面向太陽才看得清楚。選取 Directional Light，記下它原本的 Rotation，改成 **(20, 90, 0)** (Gerstner Waves 檢查 normal 時用過)：光從 $-x$ 往 $+x$、以 20 度的低角度照過來，天空裡的太陽在 $-x$ 那一邊。
+
+這一章檢查時，把 Scene 視窗攝影機 (按住右鍵加 WASD 飛行) 放在湖的 $+x$ 那一側、離水面約 2 公尺，往 $-x$ 看向太陽。整章做完再把 Rotation 改回原本的值。
+
+### Smoothness 決定 specular 的大小
+
+URP Lit 的 Smoothness block 是 0 到 1 的值 (超出範圍會被截斷)。官方的說明是：0 是又寬又模糊的 specular，1 是又小又銳利、像玻璃的 specular；它也決定反射有多清楚。現在這個 block 沒接線，用的是預設值 0.5，所以水面的 specular 是一大片模糊的亮。水是很光滑的表面，要接近 1。
+
+1. 建立 Property
+
+   Blackboard **+** > **Float**：Name `Smoothness`、Mode **Slider** (Min 0、Max 1)、Default Value **0.9**、Scope **Per Material**、Show In Inspector 勾選。確認 Reference 是 `_Smoothness`。
+
+2. 接線
+
+   把 `Smoothness` 拖進 graph，接到 Fragment 的 **Smoothness** block。
+
+3. 按 Save Asset
+
+### 現在應該看到
+
+- 太陽正下方的水面有一條銳利的亮帶，從遠處延伸到腳邊，被大波浪切成幾段，跟著波浪移動。
+- 亮帶的邊緣乾淨、表面光滑，像塗了一層塑膠。這就是要用細波紋打碎的東西。
+- 低角度看遠處，水面可能帶一點天空的顏色：表面光滑時，URP 會把天空反射在上面。
+- 深淺與泡沫和上一章一樣。
+
+<ex-fig of="sun-glint-sharp-band-check" caption="示意：攝影機壓低、面向太陽" />
+
+| 看到的現象 | 原因通常是 | 怎麼修 |
+| --- | --- | --- |
+| specular 仍是一大片模糊的亮 | Smoothness block 沒接 Property，或 Default Value 還是 0.5 | 接上，Default Value 填 0.9 |
+| 完全看不到 specular | 攝影機沒有面向太陽，或 Directional Light 沒轉 | 照「先把太陽轉到低角度」 |
+
+## 第二步：一層細波紋
+
+### 細波紋畫在 normal map 裡
+
+[Shader Basics](shader-basics.html) 講過，比 mesh 的格子還小的起伏，畫在 [[normal map]] 裡：每個 texel 存一個 normal 方向，只改光影，不移動 mesh。Sample Texture 2D node 的 Type 選 Normal 時，輸出的就是解開後的方向 (見 [Vector Math](vector-math.html)「texture 的顏色怎麼變成向量」)。這一步讓一張 normal map 鋪滿水面、隨時間漂移，接到 Fragment 的 **Normal (Tangent Space)** block。
+
+### 匯入 normal map
+
+這一章用的是一張水波的 normal map：用海浪的頻譜 (每種波長的波各有多高) 模擬出一片隨機起伏的水面，再算出每一點的 normal。它可以無縫平鋪：左右、上下邊緣接得起來，重複鋪滿水面也看不出接縫。
+
+1. 下載
+
+   從教材 GitHub repo 下載 [`Assets/Water/Textures/WaterNormal.png`](https://github.com/RogelioKG/explain-waterbody/blob/main/urp-water/unity/Assets/Water/Textures/WaterNormal.png)，放進專案的 `Assets/Water/Textures/`。
+
+   它是用 Python 腳本產生的，想改花紋可以改 [`Tools/gen_water_normal.py`](https://github.com/RogelioKG/explain-waterbody/blob/main/urp-water/unity/Tools/gen_water_normal.py) 重新產生。任何可以無縫平鋪的水波 normal map 都能換上。
+
+2. 匯入設定
+
+   在 Project 視窗選 `WaterNormal`，Inspector 改這三項，按 Apply：
+
+   | 欄位 | 值 | 原因 |
+   | --- | --- | --- |
+   | Texture Type | **Normal map** | Unity 改用 normal map 的格式存 (只存 $x$、$y$)；Sample Texture 2D 的 Type 選 Normal 時，就是照這個格式解開 |
+   | Wrap Mode | **Repeat** | 貼圖座標超過 1 時從頭再鋪一張，水面才鋪得滿 |
+   | Generate Mipmap | 勾選 | 遠處改讀預先縮小、平均過的小圖，[第五步](#第五步：遠處的波紋淡掉)會再談 |
+
+### 波紋的 UV：釘在世界裡、隨時間漂移
+
+$$\mathbf{u} = \big((x,\ z) - \mathbf{v}\,t\big)\, s$$
+
+| 符號 | 意思 |
+| --- | --- |
+| $(x, z)$ | 水面這一點的 world position，公尺 (和泡沫一樣，花紋釘在世界裡) |
+| $t$ | `_WaterTime` |
+| $\mathbf{v}$ | 漂移的速度，公尺 / 秒。減掉 $\mathbf{v}t$，原本在 $(x, z)$ 的花紋 $t$ 秒後出現在 $(x, z) + \mathbf{v}t$，也就是往 $\mathbf{v}$ 的方向漂 |
+| $s$ | 貼圖每公尺重複幾次。$s = 0.1$ 時一張圖蓋 10 公尺見方，圖上的波紋約 1 公尺 |
+
+先減再乘，$\mathbf{v}$ 的單位才是公尺 / 秒，改 $s$ 不會改變漂移的速度。
+
+### 把波紋調平：Normal Strength
+
+這張圖的波紋很陡，normal 平均偏約 25 度；湖面上的細波紋只該偏幾度。**Normal Strength** node (Create Node > Artistic > Normal > Normal Strength) 把 normal 往 (0, 0, 1) 拉 (這裡是 [[tangent space]]，右手座標系，和 world space 的左手系不同：$z$ 是表面的 normal，所以 (0, 0, 1) 是不傾斜)：
+
+| 埠 | 型別 | 用途 |
+| --- | --- | --- |
+| In | Vector 3 | tangent space 的 normal |
+| Strength | Float | $k$：0 是平的 (0, 0, 1)，1 是原樣，大於 1 更陡。沒接線時是 1 |
+| Out | Vector 3 | 調過的 normal |
+
+Normal Strength 是這樣算的：
+
+$$\mathbf{n}' = \big(k\,n_x,\ \ k\,n_y,\ \ \operatorname{lerp}(1,\ n_z,\ \operatorname{saturate}(k))\big)$$
+
+$k\,n_x$ 就是 $\operatorname{lerp}(0,\ n_x,\ k)$，所以 $k$ 在 0 到 1 之間時，整個 $\mathbf{n}'$ 就是 (0, 0, 1) 到 $\mathbf{n}$ 的插值：
+
+$$\mathbf{n}' = \operatorname{lerp}\big((0, 0, 1),\ \mathbf{n},\ k\big)$$
+
+$k$ 超過 1 時，$x$、$y$ 繼續放大，normal 更陡；$z$ 被 saturate 停在 $n_z$，不然會一路減到負的，normal 翻進表面。
+
+Out 沒有 normalize (插值的中間點略短於 1)，URP 算光照前會做。例：$\mathbf{n} = (0.45,\ 0,\ 0.893)$ 偏約 27 度。$k = 0.35$ 時 $\mathbf{n}' = (0.158,\ 0,\ 0.963)$，normalize 後是 $(0.161,\ 0,\ 0.987)$，只偏約 9 度。9 度看起來不多，但反光的方向會偏兩倍，約 18 度，太陽的倒影就從這裡跳到別處。
+
+### 把參數排進 Vector 4
+
+到這裡，一層波紋要調的參數有：漂移速度 $\mathbf{v}$ (2 個數字)、縮放 $s$、Normal Strength 的 $k$，共 4 個數字。[Gerstner Waves](gerstner-waves.html)「把參數排進 Vector 4」把一個波的 4 個數字收進一個 Vector 4 Property，這裡照做，一層波紋一個 Property：
+
+| 分量 | 放什麼 | 預設 |
+| --- | --- | --- |
+| $x$、$y$ | $\mathbf{v}$ (world $x$、$z$) | 0.3、0.1 |
+| $z$ | $s$ | 0.1 |
+| $w$ | $k$ | 0.35 |
+
+也就是一張圖蓋 10 公尺見方、波紋約 1 公尺、normal 平均偏約 9 度，每秒往 $+x$ (稍偏 $+z$) 漂約 0.3 公尺。
+
+### 在 Shader Graph 接出來
+
+1. 建立兩個 Property (Scope **Per Material**、Show In Inspector 勾選)
+
+   | Name | 型別 | Default Value | 其他 |
+   | --- | --- | --- | --- |
+   | `Ripple0` | Vector 4 | (0.3, 0.1, 0.1, 0.35) | |
+   | `RippleNormalTex` | Texture 2D | 把 `WaterNormal` 從 Project 視窗拖進來 | Mode **Normal Map** |
+
+   確認 Reference 是 `_Ripple0`、`_RippleNormalTex`。Mode 是 Material 沒指定貼圖時用的替代圖，選 Normal Map 時替代的是平的 normal。`RippleNormalTex` 不是要調的參數，[第六步](#第六步：把新參數搬進設定資產)不會把它搬進設定資產。
+
+2. 接線
+
+   <ex-fig of="ripple-normal-scroll-graph" caption="第二步的 graph" />
+
+   | node | 設定 | 輸入接什麼 | 算出 |
+   | --- | --- | --- | --- |
+   | Position | Space：**World** | | 這一點的 world position |
+   | Swizzle | Mask：**xz** | In ← Position | $(x, z)$ |
+   | Ripple0 (Property) | | | |
+   | Swizzle | Mask：**xy** | In ← Ripple0 | $\mathbf{v}$ |
+   | WaterTime (Property) | | (把 Blackboard 上已有的 `WaterTime` 再拖一個進來) | $t$ |
+   | Multiply | | A ← Swizzle ($\mathbf{v}$)；B ← WaterTime | $\mathbf{v}t$ |
+   | Subtract | | A ← Swizzle ($(x, z)$)；B ← Multiply | $(x, z) - \mathbf{v}t$ |
+   | Split | | In ← Ripple0 (可以再拖一個進來) | B = $s$，A = $k$ |
+   | Multiply | | A ← Subtract；B ← Split 的 **B** | $\mathbf{u}$ |
+   | RippleNormalTex (Property) | | | |
+   | Sample Texture 2D | Type：**Normal**、Space：**Tangent** | Texture ← RippleNormalTex；UV ← 上一個 Multiply | RGBA = 這一點的 normal |
+   | Normal Strength | | In ← Sample Texture 2D 的 **RGBA**；Strength ← Split 的 **A** | 細波紋的 normal |
+   | Fragment 的 Normal (Tangent Space) | | ← Normal Strength | |
+
+   - 第二個 Multiply 的 A 是兩個分量、B 是一個數字，Shader Graph 會把一個數字複製到每個分量，$x$、$z$ 都乘上 $s$。
+   - RGBA 是 Vector 4，接到 Vector 3 的 In 時，Shader Graph 去掉多的第四個分量。
+
+3. 按 Save Asset
+
+4. 確認 Material
+
+   選 `M_LakeWater`，Inspector 的 Ripple Normal Tex 欄應該是 `WaterNormal`；空的話把它拖進去。
+
+同一段寫成 HLSL (只是對照)：
+
+```hlsl 對照：第二步的 node 等於這幾行
+float2 uv = (PositionWS.xz - Ripple0.xy * WaterTime) * Ripple0.z;
+float3 n = SampleNormal(RippleNormalTex, uv);        // Sample Texture 2D 節點 (Type Normal)
+float3 normalTS = NormalStrength(n, Ripple0.w);     // Normal Strength 節點
+```
+
+`SampleNormal`、`NormalStrength` 這兩行是示意，代表 node，不是現成的 HLSL 函式。
+
+### 現在應該看到
+
+- [第一步](#第一步：讓-specular-出現)那條亮帶碎成許多小亮點，一邊閃一邊漂：從 $+x$ 側往 $-x$ 看時，花紋朝你漂過來、稍微偏右。
+- 亮帶以外的地方，水面有細碎的明暗。
+- 大波浪的明暗仍然看得出來，細波紋疊在上面。
+- 深淺與泡沫不變。
+
+<ex-fig of="sun-glint-ripple-sparkle-check" caption="示意：攝影機壓低、面向太陽" />
+
+| 看到的現象 | 原因通常是 | 怎麼修 |
+| --- | --- | --- |
+| 水面和[第一步](#第一步：讓-specular-出現)一樣光滑 | Normal Strength 沒接到 Normal (Tangent Space)；或 Material 的 Ripple Normal Tex 是空的，用的是平的替代圖 | 照表接；把 `WaterNormal` 拖進去 |
+| 水面粗糙得像砂紙，亮點散滿整片水面 | Normal Strength 的 Strength 沒接，用的是 1 | Strength ← Split 的 A |
+| 波紋比預期細、比較淡 | Split 的 A、B 接反 | B → Multiply、A → Strength |
+| 花紋被拉成一條條平行的線 | Position 後面的 Swizzle 填成 `xy`：水面上 $y$ 幾乎不變 | 改成 `xz` |
+| 水面整片變暗、光影怪異 | Sample Texture 2D 的 Type 還是 Default：讀到的是沒解開的值 | 改成 Normal |
+| 波紋不動 | 第一個 Multiply 的 B 沒接 `WaterTime` | 照表接 |
+
+## 第三步：細波紋怎麼貼著大波浪
+
+### Normal (Tangent Space) 是相對於大波浪的
+
+細波紋送進 Normal (Tangent Space) 的方向，URP 會用 $T$、$B$、$N$ 轉回 world space。因為這組 $N$、$T$ 正是 Vertex 送出的 Gerstner normal 與 tangent，所以 tangent space 的 (0, 0, 1) 就是大波浪在這一點的 normal，細波紋是順著大波浪的坡面再傾斜。Shader Graph 產生的程式裡是這樣寫的：
+
+```hlsl URP Varyings.hlsl BuildVaryings() 與 PBRForwardPass.hlsl InitializeInputData() (節錄，註解是說明)
+input.normalOS = vertexDescription.Normal;
+input.tangentOS.xyz = vertexDescription.Tangent.xyz;
+output.normalWS = TransformObjectToWorldNormal(input.normalOS);
+output.tangentWS = float4(TransformObjectToWorldDir(input.tangentOS.xyz), input.tangentOS.w);
+…
+float crossSign = (input.tangentWS.w > 0.0 ? 1.0 : -1.0) * GetOddNegativeScale();
+float3 bitangent = crossSign * cross(input.normalWS.xyz, input.tangentWS.xyz);
+inputData.tangentToWorld = half3x3(input.tangentWS.xyz, bitangent.xyz, input.normalWS.xyz);
+inputData.normalWS = TransformTangentToWorld(surfaceDescription.NormalTS, inputData.tangentToWorld);
+```
+
+1. Vertex (前四行)：Gerstner 算出的 normal 與 tangent 從 Normal、Tangent block 進來，取代 mesh 原本朝上的值，存進 `normalWS`、`tangentWS`；像素拿到的是 interpolation 後的值。
+2. Fragment (後四行)：用這兩個值組出 $T$、$B$、$N$，把 Normal (Tangent Space) 收到的方向轉回 world。`GetOddNegativeScale()` 在 GameObject 沒有負的 Scale 時是 1。
+
+<ex-fig of="ripple-normal-tilt-on-wave-slope" caption="示意，大波浪的切面" />
+
+### 動手確認：暫時拔掉 Vertex 的 Normal
+
+1. 在 Vertex 區，選取接到 **Normal** block 的那條線，按 Delete，Save Asset。
+2. 看水面：大波浪的明暗消失，水面看起來是平的，只剩細波紋。沒接線時 Normal block 用 mesh 原本的 normal，全部朝上，細波紋就疊在「朝上」上。
+3. 把 Transform (World→Object，Type Normal) 的輸出重新接回 Normal block，Save Asset。
+
+### B 從哪裡來：mesh 要存 tangent
+
+細波紋也靠 $B$：normal map 的綠色 channel 是往 $B$ 傾斜多少 (見 [Vector Math](vector-math.html)「texture 的顏色怎麼變成向量」)，$B$ 一旦朝反，綠色 channel 就被反著讀，波紋沿 $B$ 方向的坡面，亮的一側和暗的一側對調。
+
+上面的程式裡，$B$ 是 $N$ 和 $T$ 的 cross 再乘上 `crossSign`，而 `crossSign` 看 `tangentWS.w` 的正負。Vertex 的 Tangent block 只蓋掉 $xyz$ (`tangentOS.xyz = …`)，**$w$ 一直是 mesh 自己的值**。`WaterMesh.cs` 只算了 normal、沒有寫 tangent，$w$ 是多少沒有定義。
+
+[[bitangent]] 該朝哪裡：$B$ 沿 texture 的縱向 $v$。水面 mesh 的 $v$ 隨 $z$ 增加 (`WaterMesh.cs` 裡 `v = z / cellsZ`)，所以 $B$ 應該是 $+z$。平的水面上 $N = (0, 1, 0)$、$T = (1, 0, 0)$：
+
+$$N \times T = (0,\ 1,\ 0) \times (1,\ 0,\ 0) = (0,\ 0,\ -1)$$
+
+cross 算出 $-z$，和要的 $+z$ 相反，所以 $w$ 要是 −1：$B = w\,(N \times T) = (0,\ 0,\ 1)$。
+
+<ex-fig of="water-mesh-ntb-axes" caption="平的水面上的 N、T 與 B" />
+
+1. 先看 B 現在朝哪
+
+   亮暗對調在隨機的波紋上很難用眼睛看出來，所以直接把 $B$ 顯示成顏色來確認，不看波紋。加一個 **Bitangent Vector** node (Space：**World**) 和一個 **Saturate** (In ← Bitangent Vector)。Fragment 的 Base Color 暫時改接 Saturate，Save Asset。從上方看湖心 (那裡水夠深，幾乎不透明)，記下顏色。Bitangent Vector 在 Fragment 回傳的就是上面程式裡的 $B$；$B = (0, 0, 1)$ 時 Saturate 後是藍色，(0, 0, −1) 時是黑色。
+
+2. 在 `WaterMesh.cs` 寫入 tangent
+
+   完整檔案在 教材 GitHub repo 的 [`Assets/Water/Scripts/WaterMesh.cs`](https://github.com/RogelioKG/explain-waterbody/blob/main/urp-water/unity/Assets/Water/Scripts/WaterMesh.cs)。新增的部分：
+
+   ```csharp Assets/Water/Scripts/WaterMesh.cs Build() 這一章新增的部分
+   mesh.SetVertices(vertices);
+   mesh.SetUVs(0, uvs);
+   mesh.SetTriangles(triangles, 0, true, 0);
+   mesh.RecalculateNormals();
+
+   var tangents = new Vector4[vertexCount];
+   for (int i = 0; i < vertexCount; i++)
+   {
+       tangents[i] = new Vector4(1f, 0f, 0f, -1f);
+   }
+   mesh.tangents = tangents;
+   ```
+
+   `Mesh.tangents` 是每個 vertex 一個 `Vector4`：$xyz$ 是 tangent 的方向，$w$ 是 $B$ 要不要翻面，只該是 1 或 −1。陣列長度要和 vertex 數相同，所以寫在 `SetVertices` 之後。$xyz$ 填 (1, 0, 0)，也就是 $u$ 增加的方向；在 shader 裡它會被 Gerstner 的 tangent 取代，留下來的只有 $w$。
+
+3. 再看一次 B
+
+   存檔回到 Unity，腳本重新編譯後 `WaterMesh` 會重建 mesh。湖心應該是藍色。確認後把 Base Color 接回原本的 Lerp (泡沫色那個)，刪掉 Bitangent Vector 和 Saturate，Save Asset。
+
+### 現在應該看到
+
+- 改程式之前，湖心是藍或黑 (記下來，見「請回報」)；改程式之後是藍。
+- 兩次的細波紋看起來差不多：改之前是黑的話，差別只在沿 $z$ 方向的坡面亮暗對調，不容易看出來。
+- 接回 Normal 後，大波浪的明暗回來。
+
+<ex-fig of="bitangent-color-lake-center" caption="示意：Base Color 暫時接 Bitangent Vector (World) 的 Saturate，從上方看湖心" />
+
+| 看到的現象 | 原因通常是 | 怎麼修 |
+| --- | --- | --- |
+| 改完程式湖心仍是黑的 | $w$ 寫成 1，或 mesh 還沒重建 | 改成 −1；在 `WaterMesh` 的 Inspector 改一下 Cells 再改回，觸發重建 |
+| 湖心是綠色 | Bitangent Vector 的 Space 選成 Tangent (tangent space 的 $B$ 永遠是 (0, 1, 0)) | 改成 World |
+| 拔掉線後大波浪的明暗還在 | 拔的是 Tangent 或 Position 的線 | 拔 Normal 的線 |
+| 接回後大波浪的明暗沒回來 | 接到 Normal block 的不是 Transform (World→Object，Normal) | 對照 Gerstner Waves 的 node 表 |
+
+## 第四步：第二層波紋
+
+### 一層波紋像一張紙在滑
+
+只有一層時，所有花紋以同一個速度往同一個方向移動、形狀不變，看久了像一張印了花紋的紙在水面上滑；同一張圖每 10 公尺鋪一次，也看得出重複。真的水面上，大小不同的波紋往不同方向走、互相穿過，形狀一直在變。
+
+所以加第二層：同一張 normal map 再讀一次，換一個縮放、往另一個方向漂。兩層的花紋大小不同、一直互相錯開，疊起來的形狀一直在變，看不出重複，整片也不再朝同一個方向平移。兩層的 normal 用 **Normal Blend** 疊 (Default 模式)；[Vector Math](vector-math.html)「兩張 normal map 怎麼疊」講過，不能取平均：
+
+$$\mathbf{n} = \operatorname{normalize}\big(a_x + b_x,\ \ a_y + b_y,\ \ a_z\,b_z\big)$$
+
+$\mathbf{a}$、$\mathbf{b}$ 是兩層的 normal (tangent space)。疊完再接一個 Normal Strength，調整體的強度 (`RippleStrength`)：1 是原樣，0 是平的。
+
+第二層的預設是 **(−0.15, 0.25, 0.25, 0.35)**：一張圖蓋 4 公尺見方、波紋約 0.5 公尺，每秒往 $-x$、$+z$ 之間漂約 0.3 公尺。兩層的 $k$ 一樣，normal 的傾斜差不多，誰也不會蓋過誰。
+
+### 接線
+
+1. 建立 Property
+
+   | Name | 型別 | Mode | Default Value |
+   | --- | --- | --- | --- |
+   | `Ripple1` | Vector 4 | | (−0.15, 0.25, 0.25, 0.35) |
+   | `RippleStrength` | Float | Slider (Min 0、Max 2) | 1 |
+
+   兩個都是 Scope **Per Material**、Show In Inspector 勾選。
+
+2. 複製第一層
+
+   框選第一層的 Swizzle (xy)、兩個 Multiply、Subtract、Split、Sample Texture 2D、Normal Strength 七個 node，Ctrl+C、Ctrl+V。貼上的 node 只保留彼此之間的線，外面的線補上：
+
+   | 複製出來的 node | 輸入接什麼 |
+   | --- | --- |
+   | Swizzle (xy)、Split | In ← 新拖進來的 `Ripple1` |
+   | 第一個 Multiply | B ← `WaterTime` |
+   | Subtract | A ← 第一層用的 Swizzle ($(x, z)$) |
+   | Sample Texture 2D | Texture ← `RippleNormalTex` |
+
+3. 混合
+
+   <ex-fig of="ripple-two-layer-blend-graph" caption="第四步的 graph。綠框是新加的 node 與線" />
+
+   | node | 設定 | 輸入接什麼 |
+   | --- | --- | --- |
+   | Normal Blend | Mode：**Default** | A ← 第一層的 Normal Strength；B ← 第二層的 Normal Strength |
+   | RippleStrength (Property) | | |
+   | Normal Strength | | In ← Normal Blend；Strength ← RippleStrength |
+   | Fragment 的 Normal (Tangent Space) | | ← 新的 Normal Strength (取代原本第一層的線) |
+
+4. 按 Save Asset
+
+### 現在應該看到
+
+- 小亮點不再整片往同一個方向滑：粗的花紋朝你漂過來，細的花紋往遠處、偏右漂。
+- 花紋的形狀一直在變，看不出重複。
+- Material 上的 RippleStrength 改成 0：回到[第一步](#第一步：讓-specular-出現)的光滑亮帶；改成 2：波紋更粗糙。看完改回 1。
+- 遠處的水面還看得到波紋，糊成一片模糊的明暗。這是下一步要處理的問題。
+
+<ex-fig of="ripple-two-layer-drift-check" caption="示意：攝影機壓低、面向太陽。箭頭是花紋漂移的方向" />
+
+| 看到的現象 | 原因通常是 | 怎麼修 |
+| --- | --- | --- |
+| 和一層時一樣 | Normal Blend 的 B 沒接第二層，或複製出來的 Swizzle、Split 還接著 `Ripple0` | 照表接 |
+| 第二層沒有花紋 | 複製出來的 Subtract 的 A 沒補接 (UV 到處一樣，讀到的 normal 也到處一樣)，或 Sample Texture 2D 的 Texture 沒補接 | 照表補接 |
+| 第二層不動 | 複製出來的第一個 Multiply 的 B 沒補接 `WaterTime` | 補接 |
+| 粗糙得像砂紙 | RippleStrength 太大，或某一層 Normal Strength 的 Strength 沒接 (用的是 1) | RippleStrength 改回 1；Strength ← 那一層 Split 的 A |
+| 改 RippleStrength 沒反應 | 新的 Normal Strength 的 Strength 沒接 Property，或 Normal block 還接著第一層 | 照表接 |
+
+## 第五步：遠處的波紋淡掉
+
+### 遠處的波紋
+
+攝影機離水面約 2 公尺時 (以 1440p、垂直 Field of View (FOV，視野：攝影機看得見的角度範圍) 60 度估算，示意值)，5 公尺外一個像素約涵蓋 1 公分的水面，第二層約 0.5 公尺的波紋跨過幾十個像素；40 公尺外視線幾乎貼著水面，一個像素沿視線涵蓋約 0.6 公尺，比第二層的波紋還大。
+
+匯入時勾了 Generate Mipmap，遠處的像素改讀 [[mipmap]]，拿到的是它涵蓋的那片波紋的平均，而不是其中隨便一點，攝影機移動時不會一閃一閃 (見 [Shader Basics](shader-basics.html)「從 UV 到顏色：sample 時 GPU 怎麼取色」)。但平均只把比像素小的波紋抹平，比像素大的波紋在遠處仍讀得到，糊成一片模糊的明暗。
+
+遠處本來就看不清細波紋，最簡單的做法是讓細波紋隨距離變弱，遠處的水面變成像鏡子一樣平滑。官方的 Shader Graph 水體範例也這樣做。
+
+$$F = 1 - \operatorname{smoothstep}(0,\ D,\ d)$$
+
+| 符號 | 意思 |
+| --- | --- |
+| $d$ | 攝影機到水面這一點的距離，公尺 |
+| $D$ | `RippleFadeDistance`：多遠之後細波紋完全消失，預設 60 |
+| $F$ | 1 是原樣，0 是平的 |
+
+smoothstep 在起點附近很平，所以近處幾乎不受影響：$D = 60$ 時，15 公尺處 $F = 0.84$，30 公尺處 0.5，45 公尺處 0.16。Normal Strength 的 Strength 改成 `RippleStrength` 乘上 $F$。
+
+### 接線
+
+1. 建立 Property
+
+   Blackboard **+** > **Float**：Name `RippleFadeDistance`、Mode **Slider** (Min 5、Max 200)、Default Value **60**、Scope **Per Material**、Show In Inspector 勾選。
+
+2. 接線
+
+   <ex-fig of="ripple-distance-fade-graph" caption="第五步的 graph。綠框是新加的 node 與線" />
+
+   | node | 設定 | 輸入接什麼 | 算出 |
+   | --- | --- | --- | --- |
+   | Camera | | | Position = 攝影機的 world position |
+   | Distance | | A ← Camera 的 **Position**；B ← [第二步](#第二步：一層細波紋)的 Position (World) | $d$ |
+   | RippleFadeDistance (Property) | | | $D$ |
+   | Smoothstep | | Edge1 填 **0**；Edge2 ← RippleFadeDistance；In ← Distance | |
+   | One Minus | | In ← Smoothstep | $F$ |
+   | Multiply | | A ← RippleStrength；B ← One Minus | |
+   | Normal Strength | | Strength ← Multiply (取代原本直接接的 RippleStrength) | |
+
+3. 按 Save Asset
+
+```hlsl 對照：第五步的 node 等於這幾行
+float d = distance(_WorldSpaceCameraPos, PositionWS);       // Camera 的 Position、Distance
+float F = 1 - smoothstep(0, RippleFadeDistance, d);
+float strength = RippleStrength * F;                         // 接到 Normal Strength 的 Strength
+```
+
+`_WorldSpaceCameraPos` 就是 Camera node 的 Position 輸出。
+
+### 現在應該看到
+
+- 遠處的水面像鏡子一樣平滑；遠處的太陽倒影是一條平滑的亮帶。
+- 近處的細波紋和上一步差不多。
+- Material 上的 RippleFadeDistance 改成 200：遠處又出現糊掉的波紋；改成 15：只有腳邊有波紋。看完改回 60。
+
+<ex-fig of="ripple-distance-fade-check" caption="示意：攝影機壓低、面向太陽。紅點是遠處沒有淡掉的波紋" />
+
+| 看到的現象 | 原因通常是 | 怎麼修 |
+| --- | --- | --- |
+| 遠處仍有波紋，改 RippleFadeDistance 沒反應 | Normal Strength 的 Strength 還直接接 RippleStrength | 改接 Multiply |
+| 近處平滑、遠處有波紋 | 少了 One Minus | Multiply 的 B ← One Minus |
+| 到處都沒有波紋，或出現黑點 | Smoothstep 的 Edge2 沒接 (是 0，等於除以 0) | Edge2 ← RippleFadeDistance |
+| 轉動攝影機時波紋的強弱跟著變 | Distance 的 A 接到 Camera 的 Direction | 改接 Position |
+
+## 第六步：把新參數搬進設定資產
+
+### WaterSettings.cs：新增欄位
+
+和上一章一樣，參數的來源是設定資產。在 Material 上調過的值先記下來，掛上新程式後會被蓋掉。
+
+完整檔案在 教材 GitHub repo 的 [`Assets/Water/Scripts/WaterSettings.cs`](https://github.com/RogelioKG/explain-waterbody/blob/main/urp-water/unity/Assets/Water/Scripts/WaterSettings.cs)。新增的部分 (`…` 是沒變的部分)：
+
+```csharp Assets/Water/Scripts/WaterSettings.cs 這一章新增的部分
+public const int RippleLayerCount = 2;
+public const float MinRippleFadeDistance = 1f;
+
+[System.Serializable]
+public struct RippleLayer
+{
+    public Vector2 velocity;    // 花紋漂移的速度 (世界的 X、Z)，公尺 / 秒
+    public float scale;         // 貼圖每公尺重複幾次，越大波紋越細
+    public float strength;      // 這一層 normal 的強度 (Normal Strength)：0 是平的，1 是貼圖原樣
+}
+…
+public RippleLayer[] rippleLayers =
+{
+    new RippleLayer { velocity = new Vector2(0.3f, 0.1f), scale = 0.1f, strength = 0.35f },
+    new RippleLayer { velocity = new Vector2(-0.15f, 0.25f), scale = 0.25f, strength = 0.35f },
+};
+public float rippleStrength = 1f;       // 細波紋的整體強度：0 是平的，1 是原樣
+public float rippleFadeDistance = 60f;  // 離攝影機多遠之後細波紋完全消失，公尺
+public float smoothness = 0.9f;         // 0 到 1，越大高光越小、越銳利
+
+public Vector4 GetPackedRipple(int index)
+{
+    RippleLayer r = (rippleLayers != null && index < rippleLayers.Length) ? rippleLayers[index] : default;
+    return new Vector4(r.velocity.x, r.velocity.y, Mathf.Max(r.scale, 0f), Mathf.Max(r.strength, 0f));
+}
+…
+public float RippleStrength => Mathf.Max(rippleStrength, 0f);
+public float RippleFadeDistance => Mathf.Max(rippleFadeDistance, MinRippleFadeDistance);
+public float Smoothness => Mathf.Clamp01(smoothness);
+```
+
+`RippleLayer` 的三個欄位和 `Ripple0`、`Ripple1` 的 Vector 4 一一對應 (速度佔兩個數字)，寫法和波浪的 `Wave` 相同；`GetPackedRipple` 把第 `index` 層排成 (速度 $x$, 速度 $z$, Scale, 強度)。不合理的值照樣只在這裡修正：Scale、強度的負數當成 0；`RippleFadeDistance` 至少 1 公尺 (是 0 時 smoothstep 會除以 0)；`Smoothness` 夾在 0 到 1。類別開頭的註解也改成現在的內容。
+
+### WaterBody.cs：寫進 Material
+
+```csharp Assets/Water/Scripts/WaterBody.cs 這一章新增的部分
+static readonly int RippleStrengthId = Shader.PropertyToID("_RippleStrength");
+static readonly int RippleFadeDistanceId = Shader.PropertyToID("_RippleFadeDistance");
+static readonly int SmoothnessId = Shader.PropertyToID("_Smoothness");
+static readonly int[] RippleIds =
+{
+    Shader.PropertyToID("_Ripple0"),
+    Shader.PropertyToID("_Ripple1"),
+};
+
+void WriteMaterial()
+{
+    …
+    material.SetFloat(FoamNoiseScaleId, settings.FoamNoiseScale);
+
+    for (int i = 0; i < WaterSettings.RippleLayerCount; i++)
+    {
+        material.SetVector(RippleIds[i], settings.GetPackedRipple(i));
+    }
+    material.SetFloat(RippleStrengthId, settings.RippleStrength);
+    material.SetFloat(RippleFadeDistanceId, settings.RippleFadeDistance);
+    material.SetFloat(SmoothnessId, settings.Smoothness);
+}
+```
+
+ID 的名字就是這一章建立的 Property 的 Reference (`RippleNormalTex` 除外，它留在 Material 上)。兩層波紋和波浪一樣用迴圈逐一 `SetVector`。bounds 與時間的部分沒有改。
+
+### 現在應該看到
+
+- `SO_LakeWater` 的 Inspector 在 Foam Noise Scale 下面多了 Ripple Layers (兩個 Element)、Ripple Strength、Ripple Fade Distance、Smoothness，值是預設值。
+- `M_LakeWater` Material 上這 5 個值和設定資產一致；直接改 Material 上的 Smoothness，馬上被蓋回。
+- 在設定資產把 Element 1 的 Velocity 改成 (0.5, 0.5)：細的花紋漂得更快、方向改變。看完改回。
+
+<ex-fig of="ripple-settings-inspector" caption="示意：SO_LakeWater 的 Inspector (只畫這一章新增的欄位)" />
+
+| 看到的現象 | 原因通常是 | 怎麼修 |
+| --- | --- | --- |
+| 改設定資產某一項沒反應 | graph 那個 Property 的 Reference 和 C# 的名字不同 | 對照 Reference |
+| 掛上新程式後水面變回光滑、specular 模糊 | 設定資產的新欄位是 0 | 照上面的初始值填入 |
+| Console 紅字 `does not contain a definition for 'GetPackedRipple'` 之類 | `WaterSettings.cs` 沒存檔，或名字打錯 | 對照完整檔案 |
+
+## 第七步：把一層波紋收成 Sub Graph
+
+### 兩層用同一個 Sub Graph
+
+第二層是第一層那七個 node 的複製，同一套算法放了兩份，改一份就得記得改另一份。把第一層收成 [[Sub Graph]] `SSG_Ripple_Layer`，兩層都用它；水面不變。
+
+流程：選取下表的 node → 右鍵 Convert To Sub-graph → 存到 `Assets/Water/Shaders/SubGraphs/` → 照表改接口名 → Save Asset。細節見 [Depth Coloring「把這一章的 node 收成 Sub Graph」](depth-coloring.html#第六步：把這一章的-node-收成-Sub-Graph)。
+
+| Sub Graph | 要選的 node | Inputs | Outputs |
+| --- | --- | --- | --- |
+| `SSG_Ripple_Layer` | 接著 `Ripple0` 的那一層：Swizzle (xy)、兩個 Multiply、Subtract、Split、Sample Texture 2D、Normal Strength | Ripple ← `Ripple0`<br><br>PositionXZ ← [第二步](#第二步：一層細波紋)的 Swizzle (xz)<br><br>ElapsedTime ← `WaterTime`<br><br>NormalTex ← `RippleNormalTex` | NormalTS → Normal Blend 的 A |
+
+<ex-fig of="ripple-layer-sub-graphs" caption="收成 Sub Graph 之後的 graph。藍色是 Sub Graph，綠框是換上的 node 與線；Normal Blend 之後留在主 graph" />
+
+- [第二步](#第二步：一層細波紋)的 Position、Swizzle (xz) 和 `WaterTime`、`RippleNormalTex` 兩層共用 (Position 還接著[第五步](#第五步：遠處的波紋淡掉)的 Distance)，不選；它們接進來的線就變成輸入。Normal Blend 之後的 node 處理的是兩層疊好的 normal，也留在主 graph。
+- 第二層的七個 node 刪掉，改從 Project 視窗把 `SSG_Ripple_Layer` 拖進 graph：Ripple ← `Ripple1`，其他三個輸入接和第一個同樣的來源，NormalTS → Normal Blend 的 B。
+
+### 現在應該看到
+
+- 水面和[第六步](#第六步：把新參數搬進設定資產)做完時一樣；在設定資產改 Element 1 的 Velocity，只有細的花紋跟著變 (第二個 `SSG_Ripple_Layer` 接的是 `Ripple1`)。
+- `Assets/Water/Shaders/SubGraphs/` 多了 `SSG_Ripple_Layer`。
+
+## 回頭看
+
+### 接回開頭的問題
+
+開頭的問題是：大波浪之間的水面平滑得像塑膠。一路修下來：
+
+| 步驟 | 修掉的問題 | 留下的東西 |
+| --- | --- | --- |
+| [第一步](#第一步：讓-specular-出現) | specular 是一大片模糊的亮 | Smoothness 0.9 |
+| [第二步](#第二步：一層細波紋) | 水面沒有細波紋 | world $x$、$z$ 減 $\mathbf{v}t$、乘 $s$ → Sample Texture 2D (Normal) → Normal Strength → Normal (Tangent Space) |
+| [第三步](#第三步：細波紋怎麼貼著大波浪) | 不知道細波紋相對於什麼 | $T$、$B$、$N$ 來自 Vertex 的 Normal、Tangent block；mesh 寫入 tangent，$w = -1$ |
+| [第四步](#第四步：第二層波紋) | 一層波紋像一張紙在滑 | 第二層 (不同縮放、不同方向) + Normal Blend + Normal Strength |
+| [第五步](#第五步：遠處的波紋淡掉) | 遠處還留著糊掉的波紋 | 強度乘上 $F = 1 - \operatorname{smoothstep}(0, D, d)$ |
+| [第六步](#第六步：把新參數搬進設定資產) | 參數分散在 Material 與設定資產 | 新欄位放進 `WaterSettings`，由 `WaterBody` 寫進 Material |
+| [第七步](#第七步：把一層波紋收成-Sub-Graph) | 同一套算法放了兩份 | 兩層共用 `SSG_Ripple_Layer` |
+
+### 檢查點：細碎的 specular，貼著大波浪，遠處平順
+
+做對時你會看到：
+
+- 壓低攝影機面向太陽：倒影碎成許多閃動的小亮點，兩層花紋往不同方向漂，看不出重複。
+- 大波浪的明暗仍然在，細波紋疊在大波浪的坡面上。
+- 遠處的水面像鏡子一樣平滑。
+- 深淺、泡沫、波浪的起伏都和上一章一樣 (Gerstner Waves 和 Depth Coloring 的檢查點仍然成立)。
+- 調效果用 Scene 視窗；最後用角色的攝影機在 Game 視窗確認一次。
+- 在 `SO_LakeWater` 改兩層波紋、RippleStrength、RippleFadeDistance、Smoothness，水面立刻跟著變；直接改 Material 會被蓋回。
+- 兩層波紋是兩個 `SSG_Ripple_Layer` node，Normal Blend 之後留在主 graph。
+
+<ex-fig of="ripple-normal-overall-check" caption="示意：攝影機壓低、面向太陽。左：預期。其餘：最常見的三種錯誤" />
+
+| 看到的現象 | 原因通常是 | 回到哪一步 |
+| --- | --- | --- |
+| specular 是一大片模糊的亮 | Smoothness 沒接 | [第一步](#第一步：讓-specular-出現) |
+| 水面光滑得像塑膠 | Normal (Tangent Space) 沒接，或 Strength 是 0 | [第二步](#第二步：一層細波紋)、[第四步](#第四步：第二層波紋) |
+| 大波浪的明暗不見了 | Vertex 的 Normal block 沒接回 | [第三步](#第三步：細波紋怎麼貼著大波浪) |
+| 花紋整片往同一個方向滑 | 第二層沒有接進 Normal Blend，或第二層接的是 `Ripple0` | [第四步](#第四步：第二層波紋)、[第七步](#第七步：把一層波紋收成-Sub-Graph) |
+| 遠處仍有波紋 | Strength 沒有乘上 $F$ | [第五步](#第五步：遠處的波紋淡掉) |
+| 改設定資產沒反應 | Reference 名稱不一致 | 第一、二、四、五、六步 |
+
+**對應 Final Demo**：這一章沒有新增完成的條目。它做的是視覺風格裡的「兩層捲動的法線貼圖做出細小波紋，低角度反光明顯」。Final Demo 的「水面 mesh 本身會上下起伏，不是只靠 texture 捲動假裝在動」仍然成立：細波紋只改光影，起伏來自 mesh。
+
+檢查完把 Directional Light 的 Rotation 改回原本的值。
+
+此時你的專案裡，以下檔案應該和教材 GitHub repo 的[範例程式碼](https://github.com/RogelioKG/explain-waterbody/tree/main/urp-water/unity)相同：
+
+- `Assets/Water/Scripts/WaterMesh.cs`
+- `Assets/Water/Scripts/WaterSettings.cs`
+- `Assets/Water/Scripts/WaterBody.cs`
+- `Assets/Water/Shaders/GerstnerWaves.hlsl` (這一章沒有改它)
+- `Assets/Water/Textures/FoamNoise.png` (這一章沒有改它)
+- `Assets/Water/Textures/WaterNormal.png`
+
+`SG_Water.shadergraph`、`Assets/Water/Shaders/SubGraphs/` 的四個 Sub Graph、`M_LakeWater` Material、`SO_LakeWater` 資產不在 repo 裡，以這一章的 node graph 與 node 表為準。
+
+### 下一步
+
+下一章 [Refraction](refraction.html) 讓透過水面看到的湖底和魚，跟著波紋扭曲。
+
+### 請回報
+
+以下是官方文件沒有寫清楚、需要你在 Unity 裡看一眼的事：
+
+| # | 去哪裡看 | 回報什麼 |
+| --- | --- | --- |
+| 1 | [第三步](#第三步：細波紋怎麼貼著大波浪)：改 `WaterMesh.cs` 之前與之後的 Bitangent 檢查 | 湖心各是什麼顏色。之後應該是藍；之前的顏色代表mesh 沒有 tangent 時 Unity 給的 $w$ (藍：$w \le 0$；黑：$w > 0$) |
+| 2 | [第三步](#第三步：細波紋怎麼貼著大波浪)：暫時拔掉 Vertex 的 Normal | 大波浪的明暗是否消失、只剩細波紋 |
+| 3 | [第二步](#第二步：一層細波紋)：Ripple0 用預設值時近看水面 | 波紋大約多大 (公尺)，看起來太陡還是太平 |
+| 4 | 第二、四步：花紋漂移的方向 | 從 $+x$ 側往 $-x$ 看時，粗的一層是否朝你漂、細的一層是否往遠處漂 |
+| 5 | [第四步](#第四步：第二層波紋)做完、[第五步](#第五步：遠處的波紋淡掉)之前看遠處 | 遠處的波紋是糊成一片、會閃，還是看得出貼圖重複；[第五步](#第五步：遠處的波紋淡掉)的 RippleFadeDistance 改成 200 時是否一樣 |
+| 6 | [第一步](#第一步：讓-specular-出現)：Smoothness 0.9 時壓低攝影機看遠處 | 水面有沒有帶天空的顏色 |
+| 7 | [第二步](#第二步：一層細波紋)「在 Shader Graph 接出來」第 4 點：`M_LakeWater` 的 Inspector | 建好 `RippleNormalTex` 後，Ripple Normal Tex 欄是不是自動就是 `WaterNormal` |
+| 8 | [第三步](#第三步：細波紋怎麼貼著大波浪)：改 `WaterMesh.cs` 之前湖心是黑的話 | 改前改後細波紋的亮暗看不看得出差別 |
+
+## 變化與延伸
+
+### Flow map
+
+河流的波紋要沿著河道流、繞過石頭，每個地方的流向都不一樣。flow map 是一張存著「每個地方往哪裡流」的 texture：用它推動 UV，並用兩組錯開半個週期的 UV 交替混合，避免花紋越流越拉長。湖沒有流向，這一章兩層等速漂移就夠了；需要時參考官方範例的 WaterStream。
+
+## 來源
+
+### 官方文件與原始碼
+
+縮寫：`SG` = `https://docs.unity3d.com/Packages/com.unity.shadergraph@17.3/manual`，`URP` = `https://docs.unity3d.com/Packages/com.unity.render-pipelines.universal@17.3/manual`，`S` = `https://docs.unity.com/en-us/engine/6000.3/script-reference/unityengine`，`GFX` = GitHub `Unity-Technologies/Graphics` 的 `6000.3/staging` 分支 `Packages/`。
+
+- Smoothness 的意思與範圍：`URP/lit-shader.html`
+- node：`SG/Sample-Texture-2D-Node.html`、`SG/Normal-Blend-Node.html`、`SG/Normal-Strength-Node.html`、`SG/Bitangent-Vector-Node.html`、`SG/Camera-Node.html`、`SG/Position-Node.html`、`SG/Swizzle-Node.html`、`SG/Split-Node.html`、`SG/Smoothstep-Node.html`
+- Normal Strength 的生成碼與 Strength 預設 1：`GFX/com.unity.shadergraph/Editor/Data/Nodes/Artistic/Normal/NormalStrengthNode.cs`
+- Sample Texture 2D 的 Type Normal、Space Tangent 假設貼圖是 Normal map 類型匯入 (只存 X、Y)：`SG/Sample-Texture-2D-Node.html`；Vector 4 接到 Vector 3 時去掉多的分量：`SG/Data-Types.html`
+- Texture 2D Property 的 Mode (沒有貼圖時的替代圖)：`SG/Property-Types.html`
+- normal map 的匯入設定：`https://docs.unity.com/en-us/engine/6000.3/manual/materials-and-shaders/textures/textures-reference/texture-type-normal-map`；mipmap：`https://docs.unity.com/en-us/engine/6000.3/manual/materials-and-shaders/textures/textures-getting-started/texture-mipmaps-introduction`
+- Vertex 的 Normal、Tangent block 怎麼進 Varyings，tangent 的 w 取自 mesh：`GFX/com.unity.render-pipelines.universal/Editor/ShaderGraph/Includes/Varyings.hlsl`
+- Fragment 用 interpolation 後的 normal 與 tangent 組 T、B、N、Smoothness 截斷到 0 到 1：`GFX/com.unity.render-pipelines.universal/Editor/ShaderGraph/Includes/PBRForwardPass.hlsl`；Bitangent Vector node 回傳同一個 B：`GFX/com.unity.shadergraph/Editor/Generation/Templates/BuildSurfaceDescriptionInputs.template.hlsl`
+- `Mesh.tangents` (w 為 1 或 −1)：`https://docs.unity3d.com/6000.3/Documentation/ScriptReference/Mesh-tangents.html`；`Mesh.RecalculateNormals` 不產生 tangent：`S/mesh/recalculatenormals`
+- Sub Graph 的建立與放進 graph：`SG/Create-Sub-Graph.html`、`SG/Add-Sub-Graph-To-Shader-Graph.html`；Convert To Sub-graph 實際做的事：`GFX/com.unity.shadergraph/Editor/Drawing/MaterialGraphEditWindow.cs` (`ToSubGraph`)
+- 遠處 normal 淡出、flow map：官方 Production Ready Shaders 的水體範例 (`SG/Shader-Graph-Sample-Production-Ready-Water.html`)
+</script>
+<script>
+explainer({
+  title: 'Flow Normals',
+  assumes: ['Unity 編輯器的基本操作 (看完 Unity Learn 的 Basic 與 Creative Core)', { t: 'Vector Math (tangent space、兩張 normal 怎麼疊)', href: 'vector-math.html' }, { t: 'Shader Basics', href: 'shader-basics.html' }, { t: 'Shader Graph', href: 'shader-graph.html' }, { t: 'Gerstner Waves', href: 'gerstner-waves.html' }, { t: 'Depth Coloring (做完的湖)', href: 'depth-coloring.html' }, { t: 'URP Waterbody (總覽)', href: 'urp-water.html' }],
+  approach: '重新發明：每一步先在 Unity 裡做出來，看到哪裡不對，再講下一段原理去修它',
+  env: 'Windows 11、Unity 6000.3.20f1 (英文介面)、URP 17.3、Shader Graph 17.3',
+  terms: {
+    'normal map': { def: '法線貼圖：每個 texel 存一個 normal 方向的 texture，只改光影，不移動 mesh', href: 'shader-basics.html' },
+    'mipmap': { def: '同一張 texture 預先縮小、平均過的一組小圖；遠處讀小圖', href: 'shader-basics.html' },
+    'tangent space': { def: '以表面為準的三個軸：T 沿 texture 的橫向 (U)、B 沿縱向 (V)、N 是表面的 normal', href: 'vector-math.html' },
+    'bitangent': 'B：貼著表面、沿 texture 縱向 (V) 的軸；URP 用 N 和 T 的 cross 乘上 tangent 的 w 的正負算出',
+    'Sub Graph': { def: '把一串 node 存成一個資產，在 graph 裡變成一個 node；Blackboard 的 Property 是它的輸入，Output node 收它的輸出', href: 'shader-graph.html' },
+  },
+});
+</script>
+</body>
+</html>

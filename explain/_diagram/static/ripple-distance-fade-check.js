@@ -1,0 +1,291 @@
+explainer.fig('ripple-distance-fade-check', /* html */ `
+<svg viewBox="0 0 810 216" aria-label="第五步的檢查點：遠處的水面平順；兩種常見錯誤。紅點表示沒有淡掉的波紋">
+<text class="t-b" x="125" y="14" text-anchor="middle">預期</text>
+<rect x="4" y="26" width="242" height="44" style="fill:var(--ink);fill-opacity:0.05;stroke:none" />
+<rect x="4" y="70" width="242" height="106" style="fill:var(--f4);fill-opacity:0.35;stroke:none" />
+<path d="M4,78.5 H246" style="stroke:var(--ink);stroke-opacity:0.12;stroke-width:0.6;fill:none" />
+<path d="M4,91.2 H246" style="stroke:var(--ink);stroke-opacity:0.12;stroke-width:0.9;fill:none" />
+<path d="M4,110.3 H246" style="stroke:var(--ink);stroke-opacity:0.12;stroke-width:1.2;fill:none" />
+<path d="M4,135.7 H246" style="stroke:var(--ink);stroke-opacity:0.12;stroke-width:1.5;fill:none" />
+<path d="M4,165.4 H246" style="stroke:var(--ink);stroke-opacity:0.12;stroke-width:1.8;fill:none" />
+<circle cx="125" cy="50" r="8" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="125" cy="73.2" rx="3" ry="1.2" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="125" cy="83.8" rx="6" ry="1.6" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="128.6" cy="126.1" rx="2.7" ry="1.2" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="125.5" cy="127.3" rx="2.5" ry="1.1" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="125.4" cy="98.4" rx="1.8" ry="0.8" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="89.1" cy="156.7" rx="2.9" ry="1.3" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="142.4" cy="158.1" rx="2.7" ry="1.2" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="172.7" cy="172.5" rx="3.7" ry="1.6" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="99.5" cy="141.2" rx="2.4" ry="1" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="95.4" cy="133.2" rx="2.4" ry="1" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="105.5" cy="104.8" rx="1.9" ry="0.8" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="145.5" cy="124.9" rx="2.4" ry="1" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="125" cy="143.4" rx="3" ry="1.3" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="111.4" cy="126.5" rx="2.7" ry="1.2" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="160.3" cy="173.6" rx="3.8" ry="1.7" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="111.9" cy="112.5" rx="2" ry="0.9" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="116.4" cy="154.4" rx="3.4" ry="1.5" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="150.2" cy="119.7" rx="2.5" ry="1.1" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="140.7" cy="101.2" rx="1.8" ry="0.8" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="114.5" cy="172.4" rx="3" ry="1.3" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="146" cy="142.4" rx="2.6" ry="1.1" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="148.3" cy="114.3" rx="2.3" ry="1" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="108.2" cy="105.3" rx="1.7" ry="0.8" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="96.4" cy="157.1" rx="3.2" ry="1.4" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="106.3" cy="125.6" rx="2.5" ry="1.1" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="95.6" cy="143.7" rx="2.8" ry="1.2" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="116.1" cy="101.6" rx="2" ry="0.9" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="107.5" cy="157.6" rx="3.6" ry="1.6" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="120.9" cy="101.3" rx="1.9" ry="0.9" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="94.4" cy="143.5" rx="3.2" ry="1.4" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="115.6" cy="101.6" rx="1.9" ry="0.8" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="114.9" cy="113.9" rx="1.9" ry="0.8" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="106.6" cy="138.2" rx="2.8" ry="1.2" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="122.5" cy="118.2" rx="2.5" ry="1.1" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="129.7" cy="129.1" rx="2.7" ry="1.2" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="112.7" cy="98.2" rx="1.9" ry="0.8" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="102.4" cy="158.8" rx="2.9" ry="1.3" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="162.1" cy="152.1" rx="2.7" ry="1.2" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="163.3" cy="169.9" rx="3.6" ry="1.6" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="102" cy="123.1" rx="2.1" ry="0.9" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="98.5" cy="170.9" rx="3.7" ry="1.6" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="138.9" cy="106.4" rx="2" ry="0.9" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="109.9" cy="110.2" rx="2.1" ry="0.9" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="127.4" cy="103.3" rx="2" ry="0.9" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="108.7" cy="141.1" rx="3.1" ry="1.4" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="106.7" cy="100.6" rx="1.7" ry="0.8" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="98.5" cy="125.4" rx="2.2" ry="1" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="128.9" cy="117.9" rx="2" ry="0.9" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="145.7" cy="117.3" rx="2.5" ry="1.1" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="139.9" cy="144.9" rx="2.9" ry="1.3" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="144.6" cy="166.6" rx="3.9" ry="1.7" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="123.6" cy="143" rx="3" ry="1.3" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="149.4" cy="112.9" rx="1.9" ry="0.8" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="141.3" cy="134.9" rx="2.9" ry="1.3" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="142.1" cy="151.9" rx="3.3" ry="1.4" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="110.5" cy="167" rx="3.6" ry="1.6" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="160.9" cy="165.8" rx="3.3" ry="1.4" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="157.1" cy="156.5" rx="3.2" ry="1.4" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="116.2" cy="142" rx="2.9" ry="1.3" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="94" cy="140.6" rx="2.9" ry="1.3" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<text class="t-s" x="125" y="194" text-anchor="middle">遠處平順，倒影是平滑的亮帶；</text>
+<text class="t-s" x="125" y="209" text-anchor="middle">近處照樣有細波紋</text>
+<text class="t-cost" x="405" y="14" text-anchor="middle">錯誤：遠處仍有波紋</text>
+<rect x="284" y="26" width="242" height="44" style="fill:var(--ink);fill-opacity:0.05;stroke:none" />
+<rect x="284" y="70" width="242" height="106" style="fill:var(--f4);fill-opacity:0.35;stroke:none" />
+<path d="M284,78.5 H526" style="stroke:var(--ink);stroke-opacity:0.12;stroke-width:0.6;fill:none" />
+<path d="M284,91.2 H526" style="stroke:var(--ink);stroke-opacity:0.12;stroke-width:0.9;fill:none" />
+<path d="M284,110.3 H526" style="stroke:var(--ink);stroke-opacity:0.12;stroke-width:1.2;fill:none" />
+<path d="M284,135.7 H526" style="stroke:var(--ink);stroke-opacity:0.12;stroke-width:1.5;fill:none" />
+<path d="M284,165.4 H526" style="stroke:var(--ink);stroke-opacity:0.12;stroke-width:1.8;fill:none" />
+<circle cx="405" cy="50" r="8" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="408.6" cy="126.1" rx="2.7" ry="1.2" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="405.5" cy="127.3" rx="2.5" ry="1.1" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="405.4" cy="98.4" rx="1.8" ry="0.8" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="369.1" cy="156.7" rx="2.9" ry="1.3" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="412.9" cy="86.9" rx="1.5" ry="0.7" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="414.3" cy="80.1" rx="1.4" ry="0.6" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="414" cy="144.6" rx="2.6" ry="1.1" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="405.4" cy="75.5" rx="1.2" ry="0.5" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="395.6" cy="99" rx="1.6" ry="0.7" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="401.3" cy="127.2" rx="2.7" ry="1.2" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="414.3" cy="132.4" rx="2.6" ry="1.1" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="401.7" cy="145.4" rx="2.7" ry="1.2" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="456.5" cy="173.8" rx="4" ry="1.7" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="389.9" cy="149.4" rx="2.7" ry="1.2" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="385.2" cy="109.8" rx="2.1" ry="0.9" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="424.5" cy="121" rx="2.2" ry="1" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="440" cy="170.6" rx="2.9" ry="1.3" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="420.7" cy="101.2" rx="1.8" ry="0.8" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="394.5" cy="172.4" rx="3" ry="1.3" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="426" cy="142.4" rx="2.6" ry="1.1" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="400.8" cy="86.5" rx="1.5" ry="0.7" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="372.3" cy="153.7" rx="2.8" ry="1.2" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="393.2" cy="88.3" rx="1.6" ry="0.7" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="407.1" cy="97.6" rx="1.7" ry="0.8" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="413.4" cy="99.1" rx="1.6" ry="0.7" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="375.6" cy="143.7" rx="2.8" ry="1.2" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="396.1" cy="101.6" rx="2" ry="0.9" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="387.5" cy="157.6" rx="3.6" ry="1.6" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="400.9" cy="101.3" rx="1.9" ry="0.9" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="374.4" cy="143.5" rx="3.2" ry="1.4" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="395.6" cy="101.6" rx="1.9" ry="0.8" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="394.9" cy="113.9" rx="1.9" ry="0.8" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="407.1" cy="86.9" rx="1.4" ry="0.6" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="395.6" cy="139.9" rx="2.7" ry="1.2" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="403.4" cy="170.7" rx="3.6" ry="1.6" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="375.2" cy="163" rx="2.9" ry="1.3" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="435.9" cy="166.5" rx="3.1" ry="1.4" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="413.7" cy="99" rx="1.9" ry="0.8" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="421.7" cy="99.8" rx="1.9" ry="0.8" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="399.2" cy="140.1" rx="2.4" ry="1.1" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="413.7" cy="79.6" rx="1.3" ry="0.6" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="385.2" cy="149.1" rx="3.3" ry="1.4" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="390" cy="139.5" rx="2.5" ry="1.1" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="369.3" cy="150.5" rx="2.7" ry="1.2" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="429.6" cy="136.1" rx="2.7" ry="1.2" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="423.9" cy="108.9" rx="1.9" ry="0.8" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="401.4" cy="75.8" rx="1.2" ry="0.5" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="398" cy="82.8" rx="1.4" ry="0.6" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="378.9" cy="137.3" rx="2.6" ry="1.1" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="451.1" cy="165" rx="3.5" ry="1.5" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="411.8" cy="147.9" rx="2.6" ry="1.1" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="396.2" cy="79" rx="1.3" ry="0.6" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="442.6" cy="148.8" rx="2.5" ry="1.1" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="403.6" cy="143" rx="3" ry="1.3" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="429.4" cy="112.9" rx="1.9" ry="0.8" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="421.3" cy="134.9" rx="2.9" ry="1.3" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="422.1" cy="151.9" rx="3.3" ry="1.4" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="390.5" cy="167" rx="3.6" ry="1.6" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="440.9" cy="165.8" rx="3.3" ry="1.4" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="437.1" cy="156.5" rx="3.2" ry="1.4" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="396.2" cy="142" rx="2.9" ry="1.3" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="374" cy="140.6" rx="2.9" ry="1.3" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="444.3" cy="173.5" rx="3.8" ry="1.7" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="418" cy="119.9" rx="2.3" ry="1" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="425.2" cy="124.9" rx="2.1" ry="0.9" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="365" cy="153" rx="3.2" ry="1.4" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="387.9" cy="128.8" rx="2.6" ry="1.1" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="412.4" cy="130.3" rx="2.8" ry="1.2" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="384" cy="106.3" rx="1.9" ry="0.8" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="381.4" cy="146.8" rx="2.6" ry="1.1" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<circle cx="442.8" cy="93.1" r="0.9" class="cost" style="stroke:none" />
+<circle cx="497.4" cy="82.3" r="0.9" class="cost" style="stroke:none" />
+<circle cx="444.2" cy="79.6" r="0.9" class="cost" style="stroke:none" />
+<circle cx="388.7" cy="76.6" r="0.9" class="cost" style="stroke:none" />
+<circle cx="502.8" cy="90.8" r="0.9" class="cost" style="stroke:none" />
+<circle cx="377.7" cy="92.5" r="0.9" class="cost" style="stroke:none" />
+<circle cx="361.7" cy="85.6" r="0.9" class="cost" style="stroke:none" />
+<circle cx="404.2" cy="75.2" r="0.9" class="cost" style="stroke:none" />
+<circle cx="487.3" cy="91.5" r="0.9" class="cost" style="stroke:none" />
+<circle cx="511.2" cy="88.6" r="0.9" class="cost" style="stroke:none" />
+<circle cx="326.9" cy="78.5" r="0.9" class="cost" style="stroke:none" />
+<circle cx="351.9" cy="82.5" r="0.9" class="cost" style="stroke:none" />
+<circle cx="384.7" cy="77" r="0.9" class="cost" style="stroke:none" />
+<circle cx="403.6" cy="86.6" r="0.9" class="cost" style="stroke:none" />
+<circle cx="485" cy="79.4" r="0.9" class="cost" style="stroke:none" />
+<circle cx="393.8" cy="94.9" r="0.9" class="cost" style="stroke:none" />
+<circle cx="294.4" cy="73.7" r="0.9" class="cost" style="stroke:none" />
+<circle cx="296.8" cy="92.4" r="0.9" class="cost" style="stroke:none" />
+<circle cx="421.7" cy="88.5" r="0.9" class="cost" style="stroke:none" />
+<circle cx="473.8" cy="79.2" r="0.9" class="cost" style="stroke:none" />
+<circle cx="319.1" cy="72.4" r="0.9" class="cost" style="stroke:none" />
+<circle cx="292.8" cy="82.6" r="0.9" class="cost" style="stroke:none" />
+<circle cx="343" cy="91.3" r="0.9" class="cost" style="stroke:none" />
+<circle cx="298.1" cy="75.3" r="0.9" class="cost" style="stroke:none" />
+<circle cx="392.4" cy="86.7" r="0.9" class="cost" style="stroke:none" />
+<circle cx="441.6" cy="86.7" r="0.9" class="cost" style="stroke:none" />
+<circle cx="513.2" cy="90.8" r="0.9" class="cost" style="stroke:none" />
+<circle cx="334" cy="88" r="0.9" class="cost" style="stroke:none" />
+<circle cx="329.2" cy="83.1" r="0.9" class="cost" style="stroke:none" />
+<circle cx="398.4" cy="72.3" r="0.9" class="cost" style="stroke:none" />
+<circle cx="329.3" cy="88.7" r="0.9" class="cost" style="stroke:none" />
+<circle cx="368.6" cy="78.4" r="0.9" class="cost" style="stroke:none" />
+<circle cx="409.8" cy="88.3" r="0.9" class="cost" style="stroke:none" />
+<circle cx="465.5" cy="86.3" r="0.9" class="cost" style="stroke:none" />
+<circle cx="473.9" cy="81.2" r="0.9" class="cost" style="stroke:none" />
+<circle cx="307.6" cy="93.1" r="0.9" class="cost" style="stroke:none" />
+<circle cx="457.5" cy="93.7" r="0.9" class="cost" style="stroke:none" />
+<circle cx="394" cy="75" r="0.9" class="cost" style="stroke:none" />
+<circle cx="501.8" cy="86.6" r="0.9" class="cost" style="stroke:none" />
+<circle cx="421.2" cy="80.8" r="0.9" class="cost" style="stroke:none" />
+<circle cx="475" cy="92.5" r="0.9" class="cost" style="stroke:none" />
+<circle cx="396.4" cy="94" r="0.9" class="cost" style="stroke:none" />
+<circle cx="335.4" cy="87.2" r="0.9" class="cost" style="stroke:none" />
+<circle cx="480.1" cy="88.8" r="0.9" class="cost" style="stroke:none" />
+<circle cx="456.4" cy="87" r="0.9" class="cost" style="stroke:none" />
+<circle cx="499.4" cy="77" r="0.9" class="cost" style="stroke:none" />
+<circle cx="517.7" cy="94.9" r="0.9" class="cost" style="stroke:none" />
+<circle cx="473.6" cy="84.5" r="0.9" class="cost" style="stroke:none" />
+<circle cx="501.8" cy="79.5" r="0.9" class="cost" style="stroke:none" />
+<circle cx="369.2" cy="92" r="0.9" class="cost" style="stroke:none" />
+<circle cx="391.1" cy="73.9" r="0.9" class="cost" style="stroke:none" />
+<circle cx="468.3" cy="84.8" r="0.9" class="cost" style="stroke:none" />
+<circle cx="293.7" cy="83.4" r="0.9" class="cost" style="stroke:none" />
+<circle cx="302.1" cy="90.9" r="0.9" class="cost" style="stroke:none" />
+<circle cx="327.8" cy="90.7" r="0.9" class="cost" style="stroke:none" />
+<text class="t-s" x="405" y="194" text-anchor="middle">Normal Strength 的 Strength</text>
+<text class="t-s" x="405" y="209" text-anchor="middle">還直接接 RippleStrength</text>
+<text class="t-cost" x="685" y="14" text-anchor="middle">錯誤：近處平、遠處有紋</text>
+<rect x="564" y="26" width="242" height="44" style="fill:var(--ink);fill-opacity:0.05;stroke:none" />
+<rect x="564" y="70" width="242" height="106" style="fill:var(--f4);fill-opacity:0.35;stroke:none" />
+<path d="M564,78.5 H806" style="stroke:var(--ink);stroke-opacity:0.12;stroke-width:0.6;fill:none" />
+<path d="M564,91.2 H806" style="stroke:var(--ink);stroke-opacity:0.12;stroke-width:0.9;fill:none" />
+<path d="M564,110.3 H806" style="stroke:var(--ink);stroke-opacity:0.12;stroke-width:1.2;fill:none" />
+<path d="M564,135.7 H806" style="stroke:var(--ink);stroke-opacity:0.12;stroke-width:1.5;fill:none" />
+<path d="M564,165.4 H806" style="stroke:var(--ink);stroke-opacity:0.12;stroke-width:1.8;fill:none" />
+<circle cx="685" cy="50" r="8" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="679.9" cy="87.4" rx="1.4" ry="0.6" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="694.3" cy="80.1" rx="1.4" ry="0.6" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="669" cy="95.2" rx="1.7" ry="0.7" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="678.3" cy="82.7" rx="1.3" ry="0.6" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="684.4" cy="78.2" rx="1.3" ry="0.6" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="691.1" cy="84.2" rx="1.4" ry="0.6" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="681.5" cy="72.2" rx="1.1" ry="0.5" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="688" cy="84.6" rx="1.5" ry="0.6" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="680.8" cy="86.5" rx="1.5" ry="0.7" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="677.7" cy="90.5" rx="1.5" ry="0.6" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="691.4" cy="82.7" rx="1.3" ry="0.6" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="689.3" cy="92.1" rx="1.5" ry="0.7" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="698" cy="88.2" rx="1.5" ry="0.6" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="675.4" cy="84.6" rx="1.4" ry="0.6" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="685" cy="125.1" rx="15" ry="3.4" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<ellipse cx="685" cy="154.8" rx="21" ry="4.6" style="fill:var(--bg);stroke:var(--muted);stroke-width:0.6" />
+<circle cx="708.9" cy="77.7" r="0.9" class="cost" style="stroke:none" />
+<circle cx="674" cy="80.7" r="0.9" class="cost" style="stroke:none" />
+<circle cx="681.2" cy="94.4" r="0.9" class="cost" style="stroke:none" />
+<circle cx="771.5" cy="85.4" r="0.9" class="cost" style="stroke:none" />
+<circle cx="603.4" cy="76.3" r="0.9" class="cost" style="stroke:none" />
+<circle cx="760" cy="93.2" r="0.9" class="cost" style="stroke:none" />
+<circle cx="611.8" cy="77.8" r="0.9" class="cost" style="stroke:none" />
+<circle cx="788.9" cy="89.2" r="0.9" class="cost" style="stroke:none" />
+<circle cx="791.2" cy="76.6" r="0.9" class="cost" style="stroke:none" />
+<circle cx="709.4" cy="92.6" r="0.9" class="cost" style="stroke:none" />
+<circle cx="591.5" cy="81.8" r="0.9" class="cost" style="stroke:none" />
+<circle cx="794.2" cy="72.9" r="0.9" class="cost" style="stroke:none" />
+<circle cx="733.3" cy="77.6" r="0.9" class="cost" style="stroke:none" />
+<circle cx="761.4" cy="78" r="0.9" class="cost" style="stroke:none" />
+<circle cx="636.3" cy="85.9" r="0.9" class="cost" style="stroke:none" />
+<circle cx="737" cy="76.1" r="0.9" class="cost" style="stroke:none" />
+<circle cx="620.9" cy="73.6" r="0.9" class="cost" style="stroke:none" />
+<circle cx="768.2" cy="85" r="0.9" class="cost" style="stroke:none" />
+<circle cx="633.1" cy="86.3" r="0.9" class="cost" style="stroke:none" />
+<circle cx="615.1" cy="93.4" r="0.9" class="cost" style="stroke:none" />
+<circle cx="630.5" cy="72.4" r="0.9" class="cost" style="stroke:none" />
+<circle cx="581.3" cy="82.4" r="0.9" class="cost" style="stroke:none" />
+<circle cx="654" cy="76.1" r="0.9" class="cost" style="stroke:none" />
+<circle cx="598.1" cy="85.3" r="0.9" class="cost" style="stroke:none" />
+<circle cx="777.3" cy="80.4" r="0.9" class="cost" style="stroke:none" />
+<circle cx="722" cy="94.9" r="0.9" class="cost" style="stroke:none" />
+<circle cx="704.9" cy="88.1" r="0.9" class="cost" style="stroke:none" />
+<circle cx="575.3" cy="75.3" r="0.9" class="cost" style="stroke:none" />
+<circle cx="781.8" cy="72.4" r="0.9" class="cost" style="stroke:none" />
+<circle cx="794.2" cy="88.3" r="0.9" class="cost" style="stroke:none" />
+<circle cx="717.1" cy="72.5" r="0.9" class="cost" style="stroke:none" />
+<circle cx="739.4" cy="83.2" r="0.9" class="cost" style="stroke:none" />
+<circle cx="802.8" cy="79.4" r="0.9" class="cost" style="stroke:none" />
+<circle cx="695.9" cy="73.8" r="0.9" class="cost" style="stroke:none" />
+<circle cx="779.4" cy="89.2" r="0.9" class="cost" style="stroke:none" />
+<circle cx="733.1" cy="89.2" r="0.9" class="cost" style="stroke:none" />
+<circle cx="782.9" cy="90.5" r="0.9" class="cost" style="stroke:none" />
+<circle cx="728.7" cy="80.2" r="0.9" class="cost" style="stroke:none" />
+<circle cx="772.6" cy="93" r="0.9" class="cost" style="stroke:none" />
+<circle cx="753.6" cy="81.7" r="0.9" class="cost" style="stroke:none" />
+<circle cx="702.2" cy="92.1" r="0.9" class="cost" style="stroke:none" />
+<circle cx="657.2" cy="86.6" r="0.9" class="cost" style="stroke:none" />
+<circle cx="710.7" cy="85.6" r="0.9" class="cost" style="stroke:none" />
+<circle cx="717.9" cy="73.9" r="0.9" class="cost" style="stroke:none" />
+<circle cx="774.6" cy="95.2" r="0.9" class="cost" style="stroke:none" />
+<circle cx="658.7" cy="89" r="0.9" class="cost" style="stroke:none" />
+<circle cx="704.1" cy="89.1" r="0.9" class="cost" style="stroke:none" />
+<circle cx="764.9" cy="82.3" r="0.9" class="cost" style="stroke:none" />
+<circle cx="744" cy="74" r="0.9" class="cost" style="stroke:none" />
+<circle cx="708.9" cy="72.7" r="0.9" class="cost" style="stroke:none" />
+<circle cx="621.3" cy="83.2" r="0.9" class="cost" style="stroke:none" />
+<circle cx="684.4" cy="88.3" r="0.9" class="cost" style="stroke:none" />
+<circle cx="784.2" cy="86.3" r="0.9" class="cost" style="stroke:none" />
+<circle cx="569.7" cy="78" r="0.9" class="cost" style="stroke:none" />
+<circle cx="727" cy="79" r="0.9" class="cost" style="stroke:none" />
+<text class="t-s" x="685" y="194" text-anchor="middle">少了 One Minus</text>
+</svg>`)

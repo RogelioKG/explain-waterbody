@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>細波紋讓 normal 傾斜時，看到的湖底移多少</title>
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <header class="top">
+    <p class="concl"><span class="k-tilt">normal</span> 一斜，落點離開 A，偏移與 <span class="k-water">H</span> 成正比</p>
+    <p class="cap">切面，折射率 1.33</p>
+  </header>
+
+  <main class="stage card">
+    <canvas id="cv" role="img" aria-label=""></canvas>
+  </main>
+
+  <section class="controls card" aria-label="參數">
+    <div class="ctl">
+      <label class="name" for="s-t"><i class="dot k-tilt"></i><span>normal 傾斜</span></label>
+      <output id="o-t" for="s-t"></output>
+      <button id="play" class="k-tilt" type="button" aria-pressed="false">來回擺</button>
+      <input type="range" id="s-t" class="k-tilt" aria-label="normal 傾斜角，正值是上端往視線前進的方向偏" min="-15" max="15" step="1" value="9" />
+    </div>
+    <div class="ctl">
+      <label class="name" for="s-h"><i class="dot k-water"></i><span>水深 H</span></label>
+      <output id="o-h" for="s-h"></output>
+      <input type="range" id="s-h" class="k-water" aria-label="水深 H，公尺" min="0" max="2" step="0.05" value="1" />
+    </div>
+  </section>
+
+  <script src="./script.js"></script>
+</body>
+</html>

@@ -1,0 +1,763 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shader Graph</title>
+<script src="../_explainer/explainer.js"></script>
+</head>
+<body>
+<script type="text/markdown" id="ex-content">
+## 這一章要做什麼
+
+### 做完會有什麼
+
+這一章從 [URP Setup](urp-setup.html) 做完的 Scene 接著做：湖面上還是暫時的 Material `M_WaterTemp`。vertex、fragment、UV 這些名詞的意思見 [Shader Basics](shader-basics.html)。
+
+做完時：
+
+- 水面換上你自己建的 [[shader]]：一個叫 `SG_Water` 的 Shader Graph，水面變成 opaque 的藍色，顏色可以在 Material 上調
+- 一個練習用的方塊，放在另一個自己的 Scene 裡，顏色隨時間在紅、黃之間變化。同一件事你會做三次：先用 node 接出來，再把一串 node 包成一個 Sub Graph，最後改寫成一小段 HLSL，讓顏色變成一格一格地跳
+- 看得懂 Custom Function node 裡的 HLSL：型別、取分量、常用的內建函式、`out` 參數
+
+每一步之後有「現在應該看到」；每一段結束時有檢查點：做對時的現象、預期與常見錯誤並排的示意圖、看到錯誤時對照原因的表。
+
+## 建立水面的 Shader Graph
+
+### 建立 graph 資產
+
+1. 建立資料夾 `Assets/Water/Shaders/`
+
+2. 在這個資料夾上按右鍵 > Create > Shader Graph > URP > **Lit Shader Graph**，命名為 `SG_Water`，按 Enter
+
+   [[Lit]] 表示 URP 會替它計算光照。Project 視窗多了一個 `SG_Water` 資產 (檔名 `SG_Water.shadergraph`)。
+
+3. 打開它
+
+   建立後 Shader Graph 視窗通常會自動打開；沒有的話，雙擊 `SG_Water`。
+
+### 視窗的各個區域
+
+<ex-fig of="shader-graph-window-areas" caption="Shader Graph 視窗的區域 (示意；Blackboard、Graph Inspector、Main Preview 是浮動面板，可以拖曳移動)" />
+
+| 區域 | 做什麼 |
+| --- | --- |
+| Toolbar | 最左邊的 **Save Asset** 存檔。右邊的 **Blackboard**、**Graph Inspector**、**Main Preview** 三個按鈕開關同名的面板 |
+| Workspace | 中間的格子區，放 node、拉線 |
+| Master Stack | graph 的終點，最後的結果接到這裡 |
+| Blackboard | 這個 graph 的 Property 清單 (下一段會用) |
+| Graph Inspector | 顯示選取的東西的設定。有 **Graph Settings** (整個 graph 的設定) 與 **Node Settings** (選取的 node 或 Property 的設定) 兩個分頁 |
+| Main Preview | 即時預覽目前的結果。左鍵拖曳旋轉、滾輪縮放 |
+
+在 Workspace 裡移動視角：
+
+| 操作 | 做什麼 |
+| --- | --- |
+| 按住 Alt + 左鍵拖曳 | 平移 |
+| 滾輪 | 縮放 |
+| A | 把所有東西放進畫面 |
+| F | 把選取的東西放進畫面 |
+
+看不到某個面板時，按 Toolbar 上同名的按鈕。
+
+### Master Stack：vertex 和 fragment 各一區
+
+Master Stack 分成兩區，對應 shader 的兩個階段：
+
+- **Vertex**：每個 vertex 跑一次，決定 vertex 最後放在哪裡、normal 朝哪裡。有 **Position**、**Normal**、**Tangent** 三個 [[block]]。
+- **Fragment**：每個像素跑一次，決定這個像素的表面長什麼樣子。新建的 Lit graph 有 **Base Color**、**Normal (Tangent Space)**、**Metallic**、**Smoothness**、**Emission**、**Ambient Occlusion** 六個 block。
+
+node 接到 Vertex 區的 block，就成為 vertex 階段的程式；接到 Fragment 區，就成為 fragment 階段的程式。
+
+沒有接線的 block 用預設值。Base Color 的預設值是灰色，所以這個 graph 什麼都還沒接，套上去的物體會是灰色的。
+
+### Position node：接 Vertex 區是 vertex 的位置，接 Fragment 區是像素的位置
+
+**Position** node 沒有輸入，輸出 `Out` 是一個 Vector 3：一點的位置。node 上的 Space 下拉選單決定用哪個座標空間，選 **World** 就是 world position，單位公尺。
+
+它給的是水面上「這一點」自己的位置，不是水面這個 GameObject 的位置。假設 `WaterSurface` 在 world 裡的位置是 (10, 0, 20)：水面 60 公尺見方、以 GameObject 的位置為中心，所以左下角那一點的 Position (World) 是 (−20, 0, −10)，右上角是 (40, 0, 50)，只有正中央那一點是 (10, 0, 20)。GameObject 本身的位置是 **Object** node 的 `Position` 輸出，整片水面每一點拿到的都是同一個 (10, 0, 20)。
+
+「這一點」是哪一點，看 node 最後接到哪一區：
+
+| 接到 | 跑幾次 | Position 是 |
+| --- | --- | --- |
+| Vertex 區的 block | 每個 vertex 一次：200 × 200 格的水面有 40401 個 vertex | 這個 vertex 的位置 |
+| Fragment 區的 block | 每個像素一次 | 這個像素在水面上那一點的位置：由它所在三角形的三個 vertex 的位置插值而來 (見 [「5 interpolation：三角形內部的值從哪來」](shader-basics.html#5-interpolation：三角形內部的值從哪來)) |
+
+例如一個像素落在 (−20, 0, −10) 和 (−19.7, 0, −10) 兩個 vertex 的正中間，接在 Fragment 區時它拿到的是 (−19.85, 0, −10)。
+
+node 本身沒有分 vertex 版和 fragment 版：Shader Graph 從 block 往回看，接到 Vertex 區的 node 在 vertex 階段算，接到 Fragment 區的在 fragment 階段算；同一個 node 兩區都接的話，兩個階段各算一次，各自拿到自己那一點的位置。
+
+Vertex 區的 Position block 改了 vertex 的位置時 (例如讓水面起伏)，Fragment 區拿到的是用改過之後的 vertex 位置插值出來的位置。
+
+### Graph Settings
+
+1. 打開 Graph Inspector 的 **Graph Settings** 分頁，確認這三項：
+
+   | 設定 | 值 | 意思 |
+   | --- | --- | --- |
+   | Precision | Single | 整個 graph 用 32 位元的浮點數計算 |
+   | Surface Type | Opaque | 不透明：水面會完全擋住後面的東西 |
+   | Fragment Normal Space | Tangent | Fragment 區的 Normal block 用哪個空間。不動它 |
+
+   不是這些值就改過來。
+
+2. 按 Toolbar 的 **Save Asset**
+
+   改了 graph，要按 Save Asset (或 Ctrl + S)，用這個 shader 的 Material 才會更新。之後每次改完都要按。
+
+### 由 graph 建 Material、套到水面
+
+1. 在 Project 視窗對 `SG_Water` 按右鍵 > Create > **Material**
+
+   Unity 建立一個 Material，Shader 已經設成這個 graph。選取它，Inspector 的 Shader 欄顯示 graph 的名稱 `SG_Water` (可能帶著 `Shader Graphs/` 前綴，即 `Shader Graphs/SG_Water`)。
+
+2. 改名為 `M_LakeWater`，移到 `Assets/LakeDemo/Materials/`
+
+3. 套到水面
+
+   選取 `Lake` 底下的 `WaterSurface`，在 Mesh Renderer 的 Materials 把 `M_WaterTemp` 換成 `M_LakeWater`。
+
+4. 現在應該看到
+
+   水面變成 opaque 的灰色，看不到水下的魚和沉底的石頭。Surface Type 是 Opaque，這是正常的。
+
+## Property：讓水面變藍
+
+### 為什麼要用 Property
+
+水面的顏色現在寫死在 graph 裡 (Base Color 的預設灰色)，要換顏色就得打開 graph 改。[[Property]] 是 graph 對外開放的參數：在 graph 裡當作一個值來用，值本身存在 Material 上，可以在 Material 的 Inspector 調，也可以從 C# 設定。兩個 Material 用同一個 graph，各自可以是不同的顏色。
+
+### 新增 Color Property
+
+1. 在 Blackboard 標題列按 **+** > **Color**
+
+   Blackboard 多了一個 Property。選取它，設定出現在 Graph Inspector 的 **Node Settings** 分頁。
+
+2. 把 Name 填成 `Water Color` (中間有空格)，看 **Reference** 欄
+
+   現在應該看到：Reference 自動變成 `_Water_Color`。
+
+3. 把 Name 改成 `WaterColor` (沒有空格)
+
+   現在應該看到：Reference 跟著變成 `_WaterColor`。
+
+4. 其他欄位
+
+   | 欄位 | 值 |
+   | --- | --- |
+   | Default Value | 用色盤挑一個中等深度的藍色 |
+   | Mode | Default |
+   | Scope | Per Material |
+   | Show In Inspector | 勾選 |
+
+   - Color Property 的 Default Value 一開始是黑色，不改的話水面會是黑的。
+   - **Scope** 決定這個值存在哪裡：Per Material 是每個 Material 各存一份。
+   - **Show In Inspector** 勾選，它才會出現在 Material 的 Inspector。
+
+   Node Settings 裡沒有 Scope、只有 **Exposed** 勾選框的話，勾選 Exposed。
+
+### Name 和 Reference
+
+剛才的第 2、3 步看到，一個 Property 有兩個名字：
+
+| 欄位 | 誰在用 | 這個 Property 的值 |
+| --- | --- | --- |
+| Name | 人：Blackboard 和 Material Inspector 上顯示的標籤 | `WaterColor` |
+| Reference | 程式：shader 裡的變數名；C# 用 `Material.SetColor` 這類函式設定 Property 時，傳的也是它 | `_WaterColor` |
+
+Reference 預設是「底線加上 Name」，空格和符號換成底線。只要沒有手動改過 Reference，改 Name 時它就跟著重新產生；手動改過之後就不再跟著變，想恢復的話在 Reference 欄的標籤上按右鍵 > **Reset Reference**。
+
+這個專案的 Property 一律取沒有空格的 Name，Reference 就是 `_` 加上同一個字，不必另外記。
+
+### 接到 Base Color
+
+1. 把 `WaterColor` 從 Blackboard 拖進 Workspace
+
+   出現一個 `WaterColor` 的 Property node，右側有一個輸出 `Out`。
+
+2. 從 `Out` 拖一條線到 Fragment 區 **Base Color** 左邊的點
+
+   現在應該看到：Main Preview 裡的物體變成你挑的藍色。
+
+3. 按 Save Asset
+
+   現在應該看到：Scene 視窗的水面變成 opaque 的藍色。
+
+### 在 Material 上調顏色
+
+1. 在 Project 視窗選取 `M_LakeWater`
+
+   現在應該看到：Material Inspector 多了一個標籤是 `WaterColor` 的顏色欄位，值是你設的藍色。
+
+2. 把它改成別的顏色
+
+   現在應該看到：水面馬上換成新的顏色，graph 裡的 Default Value 沒有變。Material 上的值只屬於這個 Material。
+
+3. 改回一個你喜歡的藍色
+
+### 檢查點：水面套著自己的 shader
+
+做對時你會看到：
+
+- 水面是 opaque 的藍色，水邊線和以前一樣停在 $y = 0$，看不到水下的魚和沉底的石頭。
+- 選取 `WaterSurface`，Mesh Renderer 的 Material 是 `M_LakeWater`；選取 `M_LakeWater`，Shader 欄是 `SG_Water` (或 `Shader Graphs/SG_Water`)，Inspector 有 `WaterColor` 欄位。
+- `SG_Water` 的 Graph Settings：Precision 是 Single、Surface Type 是 Opaque、Fragment Normal Space 是 Tangent。
+- Blackboard 上的 `WaterColor`：Reference 是 `_WaterColor`，Scope 是 Per Material。
+
+<ex-fig of="sg-water-material-check" caption="換上 SG_Water 之後從側面看 (示意)。左：預期。中、右：最常見的兩種錯誤" />
+
+| 看到的現象 | 原因通常是 | 怎麼修 |
+| --- | --- | --- |
+| 水面還是半透明、看得到魚 | `WaterSurface` 的 Material 還是 `M_WaterTemp` | 換成 `M_LakeWater` |
+| 水面是灰色 | `WaterColor` 沒接到 Base Color，或接完沒按 Save Asset | 接線後按 Save Asset |
+| Main Preview 是藍的，水面是灰的 | 沒按 Save Asset | 按 Save Asset |
+| 水面是黑色 | `WaterColor` 的 Default Value 還是黑色，Material 上的值也是黑色 | 在 `M_LakeWater` 的 Inspector 改顏色 |
+| Material Inspector 沒有 `WaterColor` | Show In Inspector 沒勾，或沒按 Save Asset | 勾選後按 Save Asset |
+| Reference 不是 `_WaterColor` | Name 有空格，或手動改過 Reference | Name 改成 `WaterColor`；右鍵 Reference 標籤 > Reset Reference |
+| 水面是洋紅色 | graph 沒有編譯成功 | 看 Console 的第一行紅字 |
+
+這一章到這裡還沒有程式檔。
+
+## node：在練習用的方塊上接一串
+
+### 另開一個練習用的 graph
+
+接下來要練習接 node、Sub Graph 和 Custom Function，會接很多東西又刪掉，所以在另一個 graph 上做，套在一個方塊上，水面的 `SG_Water` 不再動。這些練習作品不會用在水上，全部放在自己的資料夾 `Assets/ShaderGraphPractice/` 與自己的 Scene，不會動到湖，整個資料夾之後可以整包刪掉。
+
+1. 建立資料夾 `Assets/ShaderGraphPractice/`
+
+2. 建立練習用的 Scene
+
+   File > **New Scene**。開出來的 Scene 要有一盞 Directional Light 和一台 Main Camera，沒有的話各建立一個。File > Save As，存成 `Assets/ShaderGraphPractice/ShaderGraphPractice.unity`。
+
+3. 在 `Assets/ShaderGraphPractice/` 按右鍵 > Create > Shader Graph > URP > **Lit Shader Graph**，命名為 `SG_ColorPulse`
+
+4. 打開它，在 Graph Settings 確認 Precision 是 **Single**，按 Save Asset
+
+5. 對 `SG_ColorPulse` 按右鍵 > Create > Material，命名為 `M_ColorPulse`，留在同一個資料夾
+
+6. GameObject > 3D Object > **Cube**，改名 `PracticeCube`，Position 設成 (0, 0, 0)，Main Camera 的位置通常就能看到它。把 `M_ColorPulse` Material 拖到它上面
+
+7. 現在應該看到
+
+   Hierarchy 最上面的 Scene 名稱是 `ShaderGraphPractice`；Scene 視窗裡有一個灰色的方塊。
+
+### 加 node、拉線
+
+| 操作 | 怎麼做 |
+| --- | --- |
+| 新增 node | 在 Workspace 空白處按空白鍵 (或按右鍵 > Create Node)，輸入名稱搜尋，雙擊加入 |
+| 拉線 | 從一個 node 的輸出 (右側的點) 拖到另一個 node 的輸入 (左側的點) |
+| 一個輸出接好幾條線 | 可以 |
+| 一個輸入接好幾條線 | 不行。拖新的線過去，舊的那條會被取代 |
+| 輸入不接線 | 旁邊有小欄位，直接填數字 |
+| 刪除 | 選取 node 或線，按 Delete |
+
+點的顏色代表資料的型別：淺藍是 Float (一個數字)，綠色是 Vector 2，黃色是 Vector 3，粉紅色是 Vector 4 (2、3、4 個數字組成的向量)。
+
+很多 node 有一個小預覽，顯示它目前的輸出。
+
+### 三個 Property
+
+在 Blackboard 新增，Scope 都是 Per Material、Show In Inspector 都勾選：
+
+| Name | 型別 | Default Value |
+| --- | --- | --- |
+| `Speed` | Float | 2 |
+| `ColorA` | Color | 紅色 |
+| `ColorB` | Color | 黃色 |
+
+### 接出「顏色隨時間來回」
+
+想法：取一個隨時間在 0 和 1 之間來回的數，用它在兩個顏色之間混合。
+
+<ex-fig of="color-pulse-graph" caption="SG_ColorPulse 的接法。粉紅色是 Property，紫色是 Master Stack" />
+
+1. 認識這一步的四種新 node
+
+   | node | 輸入 → 輸出 |
+   | --- | --- |
+   | **Time** | 沒有輸入。輸出 `Time` 是經過的秒數 |
+   | **Multiply**、**Add** | `A`、`B` → `Out` = $A \times B$、$A + B$。向量是每個分量各自算 |
+   | **Sine** | `In` (單位是弧度) → `Out` = sin(In)，在 −1 到 1 之間 |
+   | **Lerp** | `A`、`B`、`T` → `Out` = $A + T \times (B - A)$。$T = 0$ 得到 $A$，$T = 1$ 得到 $B$，$T = 0.5$ 得到正中間 |
+
+2. 照下表接
+
+   | node | 輸入接什麼 | 算出 |
+   | --- | --- | --- |
+   | Time | | 秒數 $t$ |
+   | Multiply | A ← Time 的 Time；B ← `Speed` | $2t$ |
+   | Sine | In ← 上一個 Multiply | $\sin 2t$，−1 到 1 |
+   | Multiply | A ← Sine；B 填 **0.5** | −0.5 到 0.5 |
+   | Add | A ← 上一個 Multiply；B 填 **0.5** | 0 到 1 |
+   | Lerp | A ← `ColorA`；B ← `ColorB`；T ← Add | 紅和黃之間的顏色 |
+   | Fragment 的 Base Color | ← Lerp | |
+
+   Lerp 的 A、B 是 Vector 4 (顏色的 R、G、B、A)，T 是 Float：一個 Float 接進向量的運算時，會被複製到每個分量。Lerp 的輸出是 Vector 4，Base Color 要 Vector 3，多出來的第四個分量直接捨棄。
+
+3. 帶數字走一遍
+
+   Speed = 2 時：
+
+   | 秒數 $t$ | $\sin 2t$ | × 0.5 + 0.5 | 顏色 |
+   | --- | --- | --- | --- |
+   | 0 | 0 | 0.5 | 紅黃正中間 (橘色) |
+   | 0.79 | 1 | 1 | ColorB (黃) |
+   | 2.36 | −1 | 0 | ColorA (紅) |
+   | 3.14 | 0 | 0.5 | 回到橘色 |
+
+   sin 每 $2\pi$ 弧度重複一次，$2t$ 走完 $2\pi$ 要 $\pi \approx 3.14$ 秒，所以一個來回約 3.1 秒。Speed 越大越快。
+
+4. 按 Save Asset
+
+### 檢查點：方塊在紅黃之間來回
+
+做對時你會看到 (Scene 視窗開著 Always Refresh 時不用按 Play；方塊不動就按 Play 看 Game 視窗)：
+
+- 方塊的顏色在紅、橘、黃之間平滑地來回，約 3 秒一次。
+- 在 `M_ColorPulse` Material 把 Speed 改成 4，來回快一倍；改回 2。
+- Main Preview 裡的物體也在變色。
+
+<ex-fig of="color-pulse-lerp-t-check" caption="Lerp 的 T 隨時間的變化 (示意)。左：預期。中、右：最常見的兩種錯誤" />
+
+| 看到的現象 | 原因通常是 | 怎麼修 |
+| --- | --- | --- |
+| 一直是橘色 | Time 沒接到 Multiply，或接的不是 Time 的 `Time` 輸出 | 照 node 表重接 |
+| 顏色會變暗、變成紅黃以外的顏色 | 少了乘 0.5 或加 0.5，T 超出 0 到 1 | 補上那個 node |
+| 一直是灰色 | Lerp 沒接到 Base Color，或沒按 Save Asset | 接上後按 Save Asset |
+| 黑色，或只在黑和某個顏色之間變 | `ColorA` 或 `ColorB` 的 Default Value 還是黑色 | 在 `M_ColorPulse` Material 改顏色 |
+| Main Preview 在變，方塊不動 | Scene 視窗沒有一直重畫 | 按 Play 看 Game 視窗 |
+| 方塊是洋紅色 | graph 沒有編譯成功 | 看 Console 的第一行紅字 |
+
+## Sub Graph：把一串 node 包成一個
+
+### 包起來有什麼好處
+
+Time、Multiply、Sine、Multiply、Add 這五個 node 合起來只做一件事：給一個隨時間在 0 和 1 之間來回的數。[[Sub Graph]] 把一串 node 存成一個資產，在 graph 裡變成一個 node：
+
+- graph 比較好讀：五個 node 變一個，名字直接說它做什麼。
+- 可以重複用：同一個 Sub Graph 拖進別的 graph 就能用，裡面改了，每個用到它的地方都跟著變。
+
+### 用 Convert To Sub-graph 建立
+
+1. 選取那五個 node
+
+   Time、兩個 Multiply、Sine、Add。在 Workspace 空白處按住左鍵拖曳，框住它們；它們排在同一列時一個框就選得到。`Speed`、`ColorA`、`ColorB` 和 Lerp 不要選。
+
+2. 在其中一個 node 上按右鍵 > **Convert To Sub-graph**
+
+   選單也可能分兩層：Convert To > Sub-graph。
+
+3. 存到 `Assets/ShaderGraphPractice/`，命名為 `SSG_Pulse`
+
+   跳出存檔視窗的話照這樣存；沒有跳出的話，到 Project 視窗找新出現的 Sub Graph 資產 (檔名結尾是 `.shadersubgraph`)，移到 `Assets/ShaderGraphPractice/` 並改名為 `SSG_Pulse`。
+
+4. 現在應該看到
+
+   五個 node 不見了，原處是一個 Sub Graph node：左邊一個輸入接著 `Speed`，右邊一個輸出接著 Lerp 的 T。原本從外面接進來的線，變成了它的輸入；從裡面接出去的線，變成了它的輸出。
+
+### 打開 SSG_Pulse，整理輸入和輸出的名字
+
+<ex-fig of="color-pulse-sub-graph" caption="換成 Sub Graph 之後。左：SG_ColorPulse 裡。右：雙擊 Pulse 打開後的內容。藍色是 Sub Graph 與它的 Output node" />
+
+1. 雙擊 Project 視窗裡的 `SSG_Pulse`
+
+   Sub Graph 有自己的視窗，長得和 Shader Graph 一樣，差別是沒有 Master Stack，改由一個 **Output** node 收結果。
+
+2. 輸入：Blackboard 上的 Property
+
+   Sub Graph 的 Blackboard Property 就是這個 node 的輸入。Blackboard 上應該有一個 Float Property，它的 Property node 接在 Multiply 的 B。雙擊名稱改成 `Speed`，在 Node Settings 把 Default Value 設成 2 (輸入沒接線時用這個值)。
+
+3. 輸出：Output node 的 Inputs 清單
+
+   選取 Output node，在 Node Settings 的 **Inputs** 清單裡應該有一項，Type 是 Float。雙擊名稱改成 `Pulse`。
+
+   名稱只能用英文字母、數字、底線、括號與空白。要加輸出時按清單右下角的 **+**，要刪除時選取那一項再按 **−**。
+
+4. 在 SSG_Pulse 的視窗按 Save Asset
+
+5. 回到 `SG_ColorPulse` 的視窗
+
+   現在應該看到：Sub Graph node 的輸入叫 `Speed`、輸出叫 `Pulse`，連線都還在。按 Save Asset。
+
+要在別的 graph 用它，把 `SSG_Pulse` 從 Project 視窗拖進那個 graph 的視窗，或在 Create Node 的搜尋欄輸入 `SSG_Pulse`。
+
+不先接 node、直接建立一個空的 Sub Graph 也可以：在 Project 視窗按右鍵 > Create > Shader Graph > **Sub Graph** (找不到的話改找 Create > Shader > Sub Graph)。
+
+### 檢查點：換成 Sub Graph 後看起來一樣
+
+做對時你會看到：
+
+- 方塊和上一個檢查點一樣，在紅黃之間約 3 秒來回一次。
+- `SG_ColorPulse` 裡是一個 `SSG_Pulse` node (輸入 `Speed`、輸出 `Pulse`)，原本那五個 node 不在了。
+- Project 視窗有 `Assets/ShaderGraphPractice/SSG_Pulse` (`SSG_Pulse.shadersubgraph`)。
+
+| 看到的現象 | 原因通常是 | 怎麼修 |
+| --- | --- | --- |
+| 方塊停在一種顏色 | Sub Graph node 的 `Speed` 沒接線，而 Sub Graph 裡 `Speed` 的 Default Value 是 0 | 接上 `Speed` Property；或把 Default Value 設成 2 |
+| 方塊的變化和以前不同 | 轉換時漏選或多選了 node | Ctrl + Z 復原，重新選那五個 node |
+| Sub Graph node 沒有輸出，Lerp 的 T 沒接線 | Output node 的 Inputs 清單是空的 | 加一個 Float 的 `Pulse`，把 Add 接到它 |
+| 改了 SSG_Pulse，`SG_ColorPulse` 沒有變化 | SSG_Pulse 的視窗沒按 Save Asset | 兩個視窗都按 Save Asset |
+| 埠的名稱旁邊出現錯誤標記 | 名稱用了不允許的字元 | 只用英文字母、數字、底線、括號與空白 |
+
+## Custom Function：用 HLSL 寫一個 node
+
+### 想讓顏色一格一格地跳
+
+現在的顏色是平滑變化的。改成一格一格地跳，例如只有 4 種顏色，每過一個門檻就跳一格：
+
+<ex-fig of="pulse-threshold-steps" caption="虛線是 Pulse 算出的平滑的數，粗線是要做出來的 t：數一數 pulse 超過了 0.25、0.5、0.75 幾個門檻" />
+
+算法是「數 pulse 超過了幾個門檻」：門檻是 1 ÷ 4、2 ÷ 4、3 ÷ 4，超過幾個，$t$ 就是幾除以 3，得到 0、1/3、2/3、1 四種值。
+
+「超過幾個門檻」其實就是 pulse × 4 無條件捨去：pulse = 0.6 時，0.6 × 4 = 2.4，捨去得 2，剛好超過 0.25 和 0.5 兩個門檻。想要 Steps 格就是 `floor(pulse × Steps)`；pulse 剛好是 1 時會算出 Steps，多了一格，所以最大只能取 Steps − 1。
+
+用 node 接的話，Multiply、Floor、Minimum、Subtract、Divide、Lerp 要接一串。寫成 [[HLSL]] (Unity shader 用的程式語言) 只要幾行，放進 **Custom Function** node：它在 graph 裡和其他 node 一樣有輸入、有輸出，裡面跑的是你寫的函式。這也順便練習讀 HLSL，之後的水面效果會用到。
+
+### 建立 ColorSteps.hlsl
+
+1. 用檔案總管或你的程式編輯器，在專案的 `Assets/ShaderGraphPractice/` 底下新增一個文字檔，命名為 `ColorSteps.hlsl`
+
+   副檔名必須是 `.hlsl`。回到 Unity，Project 視窗會出現它。
+
+2. 寫入下面的內容
+
+   ```hlsl Assets/ShaderGraphPractice/ColorSteps.hlsl
+   //UNITY_SHADER_NO_UPGRADE
+   #ifndef PRACTICE_COLOR_STEPS_INCLUDED
+   #define PRACTICE_COLOR_STEPS_INCLUDED
+
+   void ColorSteps_float(float Seconds, float Speed, float Steps, float4 ColorA, float4 ColorB,
+                         out float3 Color)
+   {
+       float pulse = sin(Seconds * Speed) * 0.5 + 0.5;
+
+       float steps = max(floor(Steps), 2.0);
+       float level = min(floor(pulse * steps), steps - 1.0);
+
+       float t = level / (steps - 1.0);
+       Color = lerp(ColorA.rgb, ColorB.rgb, t);
+   }
+
+   #endif
+   ```
+
+   完整檔案也在 教材 GitHub repo 的 [`Assets/ShaderGraphPractice/ColorSteps.hlsl`](https://github.com/RogelioKG/explain-waterbody/blob/main/urp-water/unity/Assets/ShaderGraphPractice/ColorSteps.hlsl)。
+
+### 和 C# 一樣的部分
+
+先看你不用學的：分號、大括號、`//` 註解、`+ - * /`，以及「型別 名字 = 值;」的變數宣告，寫法和意思都和 C# 相同。下面逐段看不一樣的地方。
+
+### 檔頭與檔尾
+
+| 行 | 意思 |
+| --- | --- |
+| `//UNITY_SHADER_NO_UPGRADE` | 一行註解，放在每個 Custom Function 的開頭 |
+| `#ifndef PRACTICE_COLOR_STEPS_INCLUDED` | 「如果還沒定義過這個名字，才處理到 `#endif` 為止的內容」 |
+| `#define PRACTICE_COLOR_STEPS_INCLUDED` | 定義這個名字 |
+| `#endif` | 上面那個「如果」的結尾 |
+
+這三行是 [[include guard]]：同一個檔案被引入第二次時，名字已經定義過，`#ifndef` 會跳過整段，函式就不會被定義兩次而編譯錯誤。Custom Function 用的 `.hlsl` 檔都要有它，`#ifndef` 和 `#define` 用同一個名字，專案裡每個檔案用不同的名字。
+
+### 函式的宣告
+
+```hlsl Assets/ShaderGraphPractice/ColorSteps.hlsl ColorSteps_float()
+void ColorSteps_float(float Seconds, float Speed, float Steps, float4 ColorA, float4 ColorB,
+                      out float3 Color)
+```
+
+1. 沒有 class
+
+   C# 的函式一定寫在 class 裡；HLSL 沒有 class，函式直接寫在檔案裡。
+
+2. 型別
+
+   | HLSL | 是什麼 | C# 裡最接近的 | node 上的型別 |
+   | --- | --- | --- | --- |
+   | `float` | 一個 32 位元浮點數 | `float` | Float |
+   | `float2`、`float3`、`float4` | 2、3、4 個 `float` 組成的向量 | `Vector2`、`Vector3`、`Vector4` | Vector 2、3、4 |
+   | `int` | 整數 | `int` | (node 上沒有) |
+
+   向量在 HLSL 是內建型別，不是 struct，所以有 C# 沒有的寫法，下面讀到時再講。
+
+3. `void` 與 `out`
+
+   `void` 表示函式本身不回傳值，結果經由 `out` 參數交出去。C# 也有 `out`，意思一樣：函式裡一定要給它一個值。沒標 `out` 的參數是輸入。
+
+4. 這個函式和 node 的對應
+
+   | 函式裡 | node 上 |
+   | --- | --- |
+   | 函式名 `ColorSteps_float` | node 的 Name 填 `ColorSteps` (不加 `_float`) |
+   | 沒標 `out` 的參數，依序 | Inputs 清單：`Seconds`、`Speed`、`Steps` (Float)，`ColorA`、`ColorB` (Vector 4) |
+   | 標了 `out` 的參數，依序 | Outputs 清單：`Color` (Vector 3) |
+
+   - `_float` 後綴：Custom Function 規定函式名要帶精度後綴，`_float` 是 32 位元，`_half` 是 16 位元。node 依 graph 的 Precision 自己加後綴：Precision 是 Single，它找的就是 `ColorSteps_float`。
+   - 參數順序是先所有輸入、再所有輸出，要和 node 上 Inputs、Outputs 的順序一樣，名稱也要一樣。
+   - 要多個輸出，就多寫幾個 `out` 參數，node 就多幾個輸出埠。
+   - `ColorA`、`ColorB` 用 `float4`，因為 Color Property 的輸出是 Vector 4 (R、G、B、A)。
+
+### 第一行：算出 pulse
+
+```hlsl Assets/ShaderGraphPractice/ColorSteps.hlsl ColorSteps_float()
+float pulse = sin(Seconds * Speed) * 0.5 + 0.5;
+```
+
+這一行就是 `SSG_Pulse` Sub Graph 裡那五個 node：
+
+| 程式 | node |
+| --- | --- |
+| `Seconds` | Time 的 `Time` 輸出 (從 node 的輸入接進來) |
+| `Seconds * Speed` | Multiply |
+| `sin(…)` | Sine |
+| `* 0.5` | Multiply (B = 0.5) |
+| `+ 0.5` | Add (B = 0.5) |
+
+- `sin` 是 HLSL 的內建函式，不用 `Mathf.` 這樣的前綴，直接呼叫。
+- 和 C# 不同：`0.5` 不用寫成 `0.5f`。HLSL 裡沒有後綴的小數就是 `float`。
+
+### floor 與 min：算出第幾格
+
+```hlsl Assets/ShaderGraphPractice/ColorSteps.hlsl ColorSteps_float()
+float steps = max(floor(Steps), 2.0);
+float level = min(floor(pulse * steps), steps - 1.0);
+```
+
+1. `floor(Steps)` 與 `max(…, 2.0)`
+
+   `floor` 無條件捨去，和 **Floor** node 相同：Steps 填 4.5 時當 4 格。`max` 取兩者中較大的，所以 `steps` 至少是 2。後面要除以 `steps - 1`，Steps 填 1 或沒接線 (0) 時不會除以 0。
+
+2. `floor(pulse * steps)`
+
+   pulse 是 0 到 1，乘上 `steps` 變成 0 到 `steps`，捨去後就是「超過了幾個門檻」。
+
+3. `min(…, steps - 1.0)`
+
+   取兩者中較小的，和 **Minimum** node 相同。pulse 剛好是 1 時 `floor(pulse * steps)` 是 `steps`，`min` 把它壓回 `steps - 1`。
+
+4. 帶數字走一遍
+
+   Steps = 4：
+
+   | pulse | `pulse * steps` | `floor(…)` | `steps - 1.0` | `min(…)` = level |
+   | --- | --- | --- | --- | --- |
+   | 0.6 | 2.4 | 2 | 3 | 2 |
+   | 1 | 4 | 4 | 3 | 3 |
+
+   pulse = 0.6 時 level = 2：超過了 0.25 和 0.5 兩個門檻。pulse = 1 時不壓回去的話 level 會是 4，比最後一格還多一格。
+
+   `2.0`、`1.0` 寫成小數，是因為 `steps` 是 `float`，運算的兩邊型別一致。
+
+### 最後兩行：交出顏色
+
+```hlsl Assets/ShaderGraphPractice/ColorSteps.hlsl ColorSteps_float()
+float t = level / (steps - 1.0);
+Color = lerp(ColorA.rgb, ColorB.rgb, t);
+```
+
+1. `level / (steps - 1.0)`
+
+   level 是 0 到 Steps − 1，除以 Steps − 1 後落在 0 到 1。上面的例子是 2 ÷ 3 ≈ 0.667。
+
+2. `ColorA.rgb`
+
+   取出 `ColorA` 的前三個分量 (R、G、B)，組成一個 `float3`。這種寫法叫 [[swizzle]]，是 C# 沒有的，下一節細講。Lerp node 會自動處理維度，HLSL 不會，所以要自己取出三個分量，結果才是 `float3`，交給 `out float3 Color`。
+
+3. `lerp(A, B, t)`
+
+   $A + t \times (B - A)$，和 **Lerp** node 相同。`t` 是 `float`，`A`、`B` 是 `float3`：數字和向量運算時，數字會套用到每個分量。
+
+4. `Color = …;`
+
+   給 `out` 參數一個值。node 的 `Color` 輸出拿到的就是它。
+
+### 向量的寫法
+
+C# 的 `Vector3` 有些運算不能做，HLSL 的向量都可以：
+
+| HLSL | 結果 | 說明 |
+| --- | --- | --- |
+| `float3 v = float3(1, 2, 3);` | (1, 2, 3) | 建立向量，不寫 `new` |
+| `v.x`、`v.y`、`v.z` | 1、2、3 | 取一個分量 |
+| `v.xz` | `float2(1, 3)` | 取兩個分量組成 `float2` |
+| `v.zyx` | `float3(3, 2, 1)` | 順序可以任意排 |
+| `v.xxx` | `float3(1, 1, 1)` | 同一個分量可以重複 |
+| `v.r`、`v.rgb` | 同 `v.x`、`v.xyz` | `rgba` 和 `xyzw` 指同樣的分量，給顏色用；同一次取用不能混用兩組 |
+| `float4(v, 1)` | (1, 2, 3, 1) | 用一個 `float3` 加一個數字組成 `float4` |
+| `v * 2`、`v + 1` | (2, 4, 6)、(2, 3, 4) | 數字套用到每個分量 |
+| `v * float3(0, 1, 2)` | (0, 2, 6) | 向量乘向量是逐分量相乘，和 Multiply node 相同 |
+
+取分量 (`.x`、`.xz`、`.rgb`) 對應 Split node；用幾個數字組向量 (`float3(…)`) 對應 Combine node。
+
+### 常用的內建函式
+
+每個都對應一個 node。`sin`、`cos`、`sqrt`、`floor`、`min`、`max`、`lerp` 的參數可以是 `float` 也可以是向量，向量時每個分量各自算：
+
+| HLSL | 做什麼 | 例子 | node |
+| --- | --- | --- | --- |
+| `sin(x)`、`cos(x)` | 三角函數，單位是弧度 | `sin(1.5708)` ≈ 1 | Sine、Cosine |
+| `sqrt(x)` | 平方根 | `sqrt(9)` = 3 | Square Root |
+| `floor(x)` | 無條件捨去 | `floor(2.4)` = 2 | Floor |
+| `min(a, b)`、`max(a, b)` | 取較小、較大的 | `min(4, 3)` = 3 | Minimum、Maximum |
+| `saturate(x)` | 夾在 0 到 1 | `saturate(1.2)` = 1 | Saturate |
+| `lerp(a, b, t)` | $a + t \times (b - a)$ | `lerp(10, 20, 0.25)` = 12.5 | Lerp |
+| `dot(a, b)` | 內積，得到一個數 | `dot(float3(1, 0, 0), float3(0.6, 0.8, 0))` = 0.6 | Dot Product |
+| `cross(a, b)` | 外積，兩個 `float3` 得到一個 `float3` | `cross(float3(1, 0, 0), float3(0, 1, 0))` = (0, 0, 1) | Cross Product |
+| `normalize(v)` | 方向不變，長度變成 1 | `normalize(float3(3, 0, 4))` = (0.6, 0, 0.8) | Normalize |
+
+### 接上 Custom Function node
+
+<ex-fig of="color-steps-custom-function-graph" caption="Custom Function 版的接法。綠框是這一步新加的" />
+
+1. 新增 Property `Steps`
+
+   Float，Default Value **4**，Scope Per Material，Show In Inspector 勾選。
+
+2. 新增 Custom Function node
+
+   Create Node > **Utility** > **Custom Function** (或搜尋 `Custom Function`)。
+
+3. 設定 Node Settings
+
+   選取它，在 Graph Inspector 的 Node Settings：
+
+   | 欄位 | 值 |
+   | --- | --- |
+   | Type | **File** |
+   | Source | 把 `ColorSteps.hlsl` 從 Project 視窗拖進來 |
+   | Name | `ColorSteps` (不加 `_float`) |
+
+   **Inputs** 清單按右下角的 **+** 加五個埠，雙擊名稱改名，右邊的 Type 下拉選型別；**Outputs** 加一個：
+
+   | 清單 | 名稱 | Type |
+   | --- | --- | --- |
+   | Inputs | `Seconds` | Float |
+   | Inputs | `Speed` | Float |
+   | Inputs | `Steps` | Float |
+   | Inputs | `ColorA` | Vector 4 |
+   | Inputs | `ColorB` | Vector 4 |
+   | Outputs | `Color` | Vector 3 |
+
+   順序要和函式的參數一樣；排錯時按住名稱左邊的三條線圖示拖曳調整。
+
+4. 接線
+
+   Time node 剛才被包進 `SSG_Pulse` 裡了，先新增一個 **Time**。
+
+   | 從 | 到 |
+   | --- | --- |
+   | Time 的 `Time` | Custom Function 的 `Seconds` |
+   | `Speed` (Property) | `Speed` |
+   | `Steps` (Property) | `Steps` |
+   | `ColorA` (Property) | `ColorA` |
+   | `ColorB` (Property) | `ColorB` |
+   | Custom Function 的 `Color` | Fragment 的 Base Color (取代原本從 Lerp 來的線) |
+
+   一個 Property 的輸出可以同時接好幾條線，`ColorA`、`ColorB` 接到 Lerp 的線不必先拆。
+
+5. 刪掉沒用到的 node
+
+   在 Workspace 空白處按右鍵 > Select > **Unused Nodes**，會選取所有沒有接到 Master Stack 的 node (`SSG_Pulse` node 和 Lerp)，按 Delete。`SSG_Pulse` 資產本身還留在 Project 視窗。
+
+6. 按 Save Asset
+
+### 檢查點：方塊一格一格地換色
+
+做對時你會看到：
+
+- 方塊的顏色不再平滑變化，而是在 4 種顏色 (紅、偏紅的橘、偏黃的橘、黃) 之間一格一格地跳，約 3 秒一個來回。
+- 在 `M_ColorPulse` Material 把 Steps 改成 **100**：看起來又和平滑變化差不多。改成 **2**：只在紅和黃之間跳。改回 4。
+- 把 Speed 改成 4，跳得快一倍；改回 2。
+- `SG_ColorPulse` 裡只剩 Time、四個 Property、Custom Function 這幾個 node，Custom Function 接到 Base Color。
+
+<ex-fig of="color-steps-t-check" caption="t 隨時間的變化 (示意)。左：預期。中、右：最常見的兩種錯誤" />
+
+| 看到的現象 | 原因通常是 | 怎麼修 |
+| --- | --- | --- |
+| node 上有錯誤標記，或 Console 有紅字說找不到函式 | Name 多寫了 `_float`；大小寫和檔案裡不同；Source 沒有指定檔案 | 照 Node Settings 的表重填 |
+| 錯誤訊息提到 `ColorSteps_half` | graph 或 node 的 Precision 是 Half | Graph Settings 的 Precision 改成 Single |
+| 錯誤訊息提到參數或型別不符 | Inputs、Outputs 的順序、型別或名稱和函式不同 | 對照函式的參數逐一檢查 |
+| node 的預覽變成洋紅與黑色的格子 | HLSL 有語法錯誤 | 看 node 上或 Console 的錯誤訊息，對照程式逐行比對 |
+| 只在紅和黃之間跳 | `Steps` 沒接線 (輸入是 0，被 `max` 換成 2) | 接上 `Steps` Property |
+| 停在一種顏色不動 | `Seconds` 沒接到 Time | 接上 Time 的 `Time` 輸出 |
+| 方塊是洋紅色 | graph 沒有編譯成功 | 看 Console 的第一行紅字 |
+| 改了 `.hlsl` 檔，方塊沒反應 | Unity 還沒重新匯入檔案 | 回到 Unity 等它匯入完；必要時在 graph 按一次 Save Asset |
+
+此時 `Assets/ShaderGraphPractice/ColorSteps.hlsl` 應該和教材 GitHub repo 裡的 [`Assets/ShaderGraphPractice/ColorSteps.hlsl`](https://github.com/RogelioKG/explain-waterbody/blob/main/urp-water/unity/Assets/ShaderGraphPractice/ColorSteps.hlsl) 相同。
+
+## 回頭看
+
+### 最終檢查點
+
+整章做完時：
+
+- `Assets/Water/Shaders/SG_Water.shadergraph`：URP Lit，Precision 是 Single、Surface Type 是 Opaque、Fragment Normal Space 是 Tangent，已按 Save Asset。Blackboard 只有 `WaterColor` (Reference `_WaterColor`)，接到 Base Color。
+- `Assets/LakeDemo/Materials/M_LakeWater`：由 `SG_Water` 建立，套在 `Lake` 底下的 `WaterSurface` 上。
+- 水面是 opaque 的藍色，看不到水下的魚和沉底的石頭。
+- `Assets/ShaderGraphPractice/` 裡有 `ShaderGraphPractice.unity`、`SG_ColorPulse.shadergraph`、`SSG_Pulse.shadersubgraph`、`ColorSteps.hlsl`、`M_ColorPulse`；`M_ColorPulse` 套在 `ShaderGraphPractice` Scene 裡的 `PracticeCube` 上，方塊一格一格地換色。
+- 這一章不完成 Final Demo 的任何一條。
+
+`Assets/ShaderGraphPractice/ColorSteps.hlsl` 應該和教材 GitHub repo 裡的 [`Assets/ShaderGraphPractice/ColorSteps.hlsl`](https://github.com/RogelioKG/explain-waterbody/blob/main/urp-water/unity/Assets/ShaderGraphPractice/ColorSteps.hlsl) 相同；上一章的 `WaterMesh.cs` 與 `Water.asmdef` 沒有改。
+
+### 下一步
+
+下一章是 [Gerstner Waves](gerstner-waves.html)：讓這片水面真的起伏。開始前把 Scene 開回 `Assets/LakeDemo/Lake.unity`。
+
+### 請回報
+
+以下是官方文件沒有寫清楚、需要你在 Unity 裡看一眼的事：
+
+| # | 去哪裡看 | 回報什麼 |
+| --- | --- | --- |
+| 1 | 第一次打開 `SG_Water` 的 Shader Graph 視窗 | Graph Inspector 是不是一打開就看得到；Blackboard、Graph Inspector、Main Preview 各在視窗的哪個位置 |
+| 2 | `SG_Water` 的 Graph Settings | Precision 一開始顯示什麼字 |
+| 3 | 對 `SG_Water` 按右鍵 > Create > Material 建出來的 Material | Inspector 標題寫的是 Material 還是 Material Variant |
+| 4 | 選取 Blackboard 上剛新增的 Color Property，看 Node Settings | 有沒有 Scope 欄，還是只有 Exposed 勾選框；Scope 一開始是什麼值 |
+| 5 | 同上，Name 填 `Water Color` 再改成 `WaterColor` | Reference 欄先後顯示什麼 |
+| 6 | 接好 Base Color 但還沒按 Save Asset 時的 Scene 視窗 | 水面有沒有先變色 |
+| 7 | Convert To Sub-graph | 選單是一層還是 Convert To > Sub-graph 兩層；有沒有跳出存檔視窗；Sub Graph 存到哪裡、預設檔名；Blackboard 上 Property 和 Output 輸出一開始叫什麼名字 |
+| 8 | Project 視窗右鍵的 Create 選單 | 空的 Sub Graph 在 Create > Shader Graph > Sub Graph，還是 Create > Shader > Sub Graph |
+| 9 | 改了 `SSG_Pulse` 並在它的視窗按 Save Asset 後 | `SG_ColorPulse` 沒有再存檔，方塊有沒有跟著變 |
+| 10 | Custom Function 的 Inputs 清單的 Type 下拉 | 列出了哪些型別 |
+| 11 | 故意把 Custom Function 的 Name 改成 `ColorSteps_float` | node 與 Console 顯示的錯誤訊息第一行 (看完改回來) |
+
+## 來源
+
+### 官方文件
+
+縮寫：`SG` = `https://docs.unity3d.com/Packages/com.unity.shadergraph@17.3/manual`，`MS` = `https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl`。
+
+- 建立 graph、由 graph 建 Material、Property 出現在 Material Inspector：`SG/First-Shader-Graph.html`、`SG/Create-Shader-Graph.html`
+- 視窗、面板、快捷鍵：`SG/Shader-Graph-Window.html`、`SG/Internal-Inspector.html`、`SG/Main-Preview.html`、`SG/Keyboard-shortcuts.html`
+- Master Stack、Graph Settings、Precision：`SG/Master-Stack.html`、`SG/Graph-Settings-Tab.html`、`SG/Precision-Modes.html`；URP Lit 的 block 與設定：https://docs.unity.com/en-us/engine/6000.3/manual/materials-and-shaders/built-in/shaders-in-universalrp/prebuilt-shader-graphs-urp/lit.md
+- 加 node、拉線、資料型別與顏色：`SG/Create-Node-Menu.html`、`SG/Data-Types.html`、`SG/Node.html`
+- node：`SG/Time-Node.html`、`SG/Sine-Node.html`、`SG/Multiply-Node.html`、`SG/Add-Node.html`、`SG/Lerp-Node.html`、`SG/Saturate-Node.html`、`SG/Position-Node.html`、`SG/Object-Node.html`
+- Property、Name 與 Reference、Scope：`SG/Blackboard.html`、`SG/Property-Types.html`
+- Reference 的預設產生規則 (原始碼，不是手冊)：`Unity-Technologies/Graphics` 的 `6000.3/staging` 分支，`ShaderInput.cs`
+- Sub Graph：`SG/Sub-graph.html`、`SG/Create-Sub-Graph.html`、`SG/Add-Inputs-Outputs-Sub-Graph.html`、`SG/Add-Sub-Graph-To-Shader-Graph.html`、`SG/Custom-Port-Menu.html`
+- Custom Function：`SG/Custom-Function-Node.html`
+- 洋紅色的錯誤 shader：https://docs.unity3d.com/6000.3/Documentation/Manual/shader-error.html
+- HLSL：型別 `MS/dx-graphics-hlsl-scalar`、`MS/dx-graphics-hlsl-vector`；取分量 `MS/dx-graphics-hlsl-per-component-math`；函式與 `out` `MS/dx-graphics-hlsl-function-syntax`、`MS/dx-graphics-hlsl-function-parameters`；內建函式 `MS/dx-graphics-hlsl-intrinsic-functions`
+</script>
+<script>
+explainer({
+  title: 'Shader Graph',
+  assumes: ['Unity 編輯器的基本操作 (看完 Unity Learn 的 Basic 與 Creative Core)', 'C# 基礎', { t: 'Shader Basics', href: 'shader-basics.html' }, { t: 'URP Setup (做完的 Scene)', href: 'urp-setup.html' }],
+  approach: '動手追蹤：每一步先在 Unity 裡操作，再看現在應該看到什麼；段落結尾有檢查點',
+  env: 'Windows 11、Unity 6000.3.20f1 (英文介面)、URP 17.3、Shader Graph 17.3',
+  terms: {
+    'shader': '在 GPU 上跑、決定物體怎麼畫的程式；Material 選用一個 shader，再存它需要的參數值',
+    'Lit': 'URP 會計算光照的 shader 類型，亮暗由 normal 與光的方向決定',
+    'block': 'Master Stack 裡的一格，代表一個最終輸出 (例如 Base Color)；沒接線時用預設值',
+    'Property': '屬性：graph 對外開放的參數，值存在 Material 上，可以在 Material Inspector 調或從 C# 設定；C# 用它的 Reference 指名',
+    'Sub Graph': '把一串 node 存成一個資產，在其他 graph 裡當作一個 node 用；Blackboard Property 是輸入，Output node 收輸出',
+    'HLSL': 'Unity shader 用的程式語言；Custom Function node 裡跑的就是一個 HLSL 函式',
+    'include guard': '#ifndef、#define、#endif 三行，讓同一個檔案被引入兩次時內容只算一次',
+    'swizzle': '在向量後面寫 .xz、.rgb 這類字母，取出或重排分量，組成新的向量',
+  },
+});
+</script>
+</body>
+</html>

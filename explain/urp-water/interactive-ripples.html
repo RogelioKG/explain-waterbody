@@ -1,0 +1,1147 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Interactive Ripples</title>
+<script src="../_explainer/explainer.js"></script>
+</head>
+<body>
+<script type="text/markdown" id="ex-content">
+## 這一章要解決的問題
+
+### 方塊掉進水裡，水面卻沒反應
+
+做完 [Buoyancy](buoyancy.html)，湖上方那顆方塊按下 Play 就落水、往下沉一段、浮上來，停在半泡在水裡的高度，跟著浪起伏。可是水面像什麼都沒發生：落水的地方沒有一圈圈往外散開的漣漪，也沒有濺起水花；角色走進湖裡、走到頭沒入水面，水面一樣毫無反應。
+
+這一章對應 Final Demo「互動與物理」的兩條：
+
+> 角色或物體穿過水面時產生水花或漣漪
+>
+> 浮標入水時產生漣漪
+
+這一章做的是任何物體都能用的機制，用方塊和角色驗證；浮標掛上去只要加一個元件，見[「掛到浮標上」](#掛到浮標上)。
+
+做完後：方塊落水、角色走進湖裡或走到頭沒入水面再走出來時，那裡冒出一圈往外擴散的環，邊走邊淡，2.5 秒後消失。
+
+<ex-fig of="impact-ring-anatomy-top-view" at="1" caption="示意：入水 1 秒後從上方看一圈環。右邊放大中線附近的一段" />
+
+環經過的地方，太陽的反光、天空的倒影和水下的東西都跟著彎一下。方塊落水的環，沿著中線還有一圈邊緣銳利的白色環帶；角色的環只有起伏，涉水時每走一段就多一圈，在身後連成一串。從水面上方落進水裡的那一下，還會噴出一小撮白色的水花。
+
+做法分成兩半：C# 在東西穿過水面時記下一筆[[入水事件]] (哪裡、什麼時候、多強)，傳給水面 shader；shader 對每個像素算出每一筆事件的環現在擴散到哪裡，改這個像素的 normal 和泡沫遮罩。這些寫成兩個新的 C# 檔 (`WaterImpacts`、`WaterSplash`) 和一個 HLSL 檔 `ImpactRipples.hlsl`；`Buoyancy` 一行都不改。
+
+這一章不講：漣漪彼此的干涉、碰到岸邊反彈 (要在一張貼圖上逐格模擬水面的波動)；船行駛時拖出的 V 形尾跡、下雨打在水面上的漣漪；漣漪對浮力的影響 (漣漪只改光影、不改 vertex 的高度，C# 查到的水面高度與浮力都照舊)。
+
+### 這一章怎麼走
+
+| 步驟 | 做什麼 | 接下來要處理的 |
+| --- | --- | --- |
+| [第一步](#第一步：記下入水事件) | 方塊落水時記下一筆入水事件，整批傳給 shader | 水面上還看不到任何東西 |
+| [第二步](#第二步：畫出擴散、淡掉的白色環帶) | shader 依每筆事件畫出往外擴散、慢慢變細的白色環帶 | 白色環帶像畫在水面上的線，水面本身沒有起伏 |
+| [第三步](#第三步：讓環成為水面的起伏) | 用環的高度的 gradient 改 normal，和細波紋疊在一起；參數搬進設定資產 | 只有落水那一下有漣漪 |
+| [第四步](#第四步：沉下去、浮上來、走過水面) | 沉下去、浮上來、離開水面、在水裡走動也記事件；涉水的環只有起伏，每個物體可以關掉白色環帶；掛到角色上 | 入水那一下太安靜，沒有水花 |
+| [第五步](#第五步：入水時噴水花) | 從水面上方落水時，用 Particle System 噴一撮水花 | |
+
+每一步之後都有「現在應該看到」、示意圖和對照表。
+
+## 第一步：記下入水事件
+
+### 水面要知道哪裡、什麼時候有東西掉進來
+
+**水面 shader 只看得到自己的像素，不知道方塊在哪、什麼時候落水；知道這件事的是 C#。所以 C# 在方塊穿過水面的那一格記下一筆入水事件：位置、時間、強度。三個數字就夠了，因為環之後怎麼長大、怎麼淡掉，shader 用「現在的時間減掉入水的時間」就算得出來，C# 只要寫一次，不必每一格更新。**
+
+<ex-fig of="impact-event-data-flow" caption="入水事件從 C# 到 shader 的路徑" />
+
+下面依序展開：事件存在哪、怎麼交給 shader；為什麼每次進入 Play 要清空；誰來偵測穿過水面；最後是程式。
+
+### 固定 32 格，用完就蓋掉最舊的
+
+shader 裡的陣列大小必須在編譯時就決定，所以事件放在固定 32 格的陣列裡，輪流寫：第 0 格、第 1 格……寫到第 31 格再回到第 0 格，蓋掉最舊的一筆。這種寫法叫 [[ring buffer]]。[第二步](#第二步：畫出擴散、淡掉的白色環帶)會讓每筆事件只活 2.5 秒，所以 32 格夠同時放好幾個人一起走動產生的事件；真的超過時，最舊的那圈提早消失。
+
+每筆事件存成一個 `Vector4`：
+
+| 分量 | 放什麼 |
+| --- | --- |
+| $x$、$y$ | 入水的位置 $\mathbf{c}_{\text{imp}}$ (世界的 X、Z；高度用不到，環畫在水面上) |
+| $z$ | 入水的時間 $t_{\text{imp}}$：`Time.time` |
+| $w$ | 入水時的強度 $q_{\text{imp}}$：0 到 1，越大漣漪越明顯；0 代表空格 |
+
+時間用 `Time.time`，因為 Play 中 `WaterBody` 寫進 `_WaterTime` 的也是它 ([Gerstner Waves 第六步](gerstner-waves.html#第六步：設定資產與-WaterBody))，shader 拿 `_WaterTime` 減 $t_{\text{imp}}$，才是這筆事件真正過了多久。
+
+### 交給 shader：全域的 Vector4 陣列
+
+[Gerstner Waves](gerstner-waves.html#把參數排進-Vector-4) 說過：Shader Graph 的 Property 沒有陣列型別，在 HLSL 檔裡自己宣告的陣列是全域變數，所有湖共用同一份。那時這是缺點，這裡正好是要的：一筆事件在世界上只發生一次，記的是世界座標；每片湖的 shader 拿自己像素的位置去比，只有水面蓋到那個位置的湖畫得出環，所以不必分湖存。
+
+全域陣列用 `Shader.SetGlobalVectorArray` 寫入：
+
+```csharp Shader.SetGlobalVectorArray()
+public static void SetGlobalVectorArray(int nameID, Vector4[] values);
+```
+
+| 參數 | 型別 | 用途 |
+| --- | --- | --- |
+| `nameID` | `int` | 變數名的 ID，用 `Shader.PropertyToID("_WaterImpacts")` 取得 (和 `SetGlobalFloat` 一樣) |
+| `values` | `Vector4[]` | 整個陣列 |
+
+每次都寫完整的 32 格，新增一筆就把整個陣列重寫一次。因為 Material 上的陣列在第一次寫入時長度就固定，之後寫更長的會被截掉，而全域陣列的文件沒寫是否一樣，所以一律寫滿 32 格，不受這條規則影響。
+
+所有湖共用同一份陣列，帶來兩個後果：
+
+- 兩片湖靠得很近時，一片湖上的環擴散過岸，鄰湖的水面在那個範圍內也會畫出那一段環。每片湖用自己 Material 上的 `ImpactRipple`，所以同一筆事件在兩片湖上畫出的環大小可以不同。
+- 水的 graph 不能再建 Reference 也叫 `_WaterImpacts` 的 Property：Material 自己有這個名字的值時，shader 用 Material 的，全域陣列就讀不到了。
+
+### 每次進入 Play 都清空
+
+全域 shader 變數不屬於任何 Scene，官方文件沒有寫停止 Play 時會不會被清掉。如果留著，而 `Time.time` 每次 Play 都從 0 算起，上一次 Play 在第 40 秒記下的事件，會在這一次的第 40 秒又冒出來。所以每次進入 Play 時把陣列清成全 0 再寫一次，Unity 有沒有清都一樣。
+
+C# 的 static 方法加上 `[RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.BeforeSceneLoad)]`，Unity 會在每次開始執行 (在 Editor 裡就是每次按 Play) 時呼叫它一次，不必掛在任何物件上。呼叫的時間點是第一個 Scene 的物件已經載入、任何 `Awake` 都還沒執行，所以它一定比 `WaterSplash` 第一次新增事件早，不會清掉剛記下的事件。清空陣列用 `System.Array.Clear(陣列, 起點, 長度)`，把那一段全部設成 0。
+
+### WaterImpacts.cs
+
+事件不屬於某一個物件，方塊、角色、之後任何程式都要能新增，所以寫成一個 static class：不掛在物件上，到處都能直接呼叫 `WaterImpacts.Add(位置, 強度)`。
+
+在 `Assets/Water/Scripts/` 建立 `WaterImpacts.cs`：
+
+```csharp Assets/Water/Scripts/WaterImpacts.cs WaterImpacts (第一步的版本)
+using UnityEngine;
+
+namespace Water
+{
+    // 記住最近 Capacity 筆入水事件 (位置、時間、強度)，寫進全域 shader 變數 _WaterImpacts；
+    // 水面 shader (ImpactRipples.hlsl) 依它畫出往外擴散的漣漪。
+    // 任何程式都可以呼叫 WaterImpacts.Add；格子用完就蓋掉最舊的一筆。
+    public static class WaterImpacts
+    {
+        public const int Capacity = 32;   // 和 ImpactRipples.hlsl 的 IMPACT_COUNT 相同
+
+        static readonly int WaterImpactsId = Shader.PropertyToID("_WaterImpacts");
+        static readonly Vector4[] impacts = new Vector4[Capacity];
+        static int next;   // 下一筆要寫進哪一格
+
+        // 新增一筆入水事件。position 只用 x、z；strength 0 到 1，越大漣漪越明顯，0 以下不記。
+        public static void Add(Vector3 position, float strength)
+        {
+            if (strength <= 0f)
+            {
+                return;
+            }
+            // 時間用 Time.time：Play 中 WaterBody 寫進 _WaterTime 的也是它，shader 才算得出事件過了多久
+            impacts[next] = new Vector4(position.x, position.z, Time.time, Mathf.Clamp01(strength));
+            next = (next + 1) % Capacity;
+            Shader.SetGlobalVectorArray(WaterImpactsId, impacts);
+        }
+
+        // 每次進入 Play 都清空。全域 shader 變數在 Play 結束後可能還留著 (官方文件沒寫)，
+        // 留著的話，上一次 Play 的事件會在 Time.time 重新走到那個時間時又冒出來。
+        [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.BeforeSceneLoad)]
+        static void Clear()
+        {
+            System.Array.Clear(impacts, 0, Capacity);
+            next = 0;
+            Shader.SetGlobalVectorArray(WaterImpactsId, impacts);
+        }
+    }
+}
+```
+
+- `next = (next + 1) % Capacity`：`%` 取餘數，31 加 1 變成 0，回到第一格。
+- 強度用 `Mathf.Clamp01` 夾在 0 到 1，shader 拿到的一定在這個範圍。
+
+### 誰來偵測穿過水面：WaterSplash
+
+偵測交給另一個元件 `WaterSplash`，掛在會穿過水面的物體上。現在只處理物體落水：每一格查物體的底端在不在水面下 (查水面用 [Wave Height Query](wave-height-query.html) 的 `WaterBody.TryFind` 與 `GetSurfaceHeight`)，上一格在水面上、這一格到了水面下，就是剛落水，記一筆強度 1 的事件。
+
+底端用「物體的位置往上幾公尺」表示 (在位置下方就填負數)。方塊高 1 公尺、原點在正中央，所以底端是 −0.5。
+
+先在 Console 印一行，確認事件真的有記下來；[第二步](#第二步：畫出擴散、淡掉的白色環帶)畫得出白色環帶之後拿掉。在 `Assets/Water/Scripts/` 建立 `WaterSplash.cs`：
+
+```csharp Assets/Water/Scripts/WaterSplash.cs WaterSplash (第一步的版本)
+using UnityEngine;
+
+namespace Water
+{
+    public class WaterSplash : MonoBehaviour
+    {
+        [SerializeField] float bottom = -0.5f;   // 底端：位置往上幾公尺 (在位置下方就填負數)
+
+        bool bottomBelow;   // 上一格底端在不在水面下
+
+        void Update()
+        {
+            Vector3 position = transform.position;
+            bool below = WaterBody.TryFind(position, out WaterBody water)
+                && position.y + bottom < water.GetSurfaceHeight(position);
+            if (below && !bottomBelow)
+            {
+                WaterImpacts.Add(position, 1f);
+                Debug.Log($"WaterSplash: impact at ({position.x:0.0}, {position.z:0.0})", this);
+            }
+            bottomBelow = below;
+        }
+    }
+}
+```
+
+`$"…{position.x:0.0}…"` 是 C# 的字串插值：大括號裡的值直接填進字串，`:0.0` 是留一位小數。
+
+### 放進 Scene
+
+選取湖上方的方塊，**Add Component** > **Water Splash**，Bottom 用預設的 −0.5。按 Play。
+
+方塊每次 Play 只落水一次。想在同一次 Play 裡再看一次，在 Inspector 把方塊 Transform 的 Position Y 改回放手時的高度 (水面在 Y = 0、底面離水面 1 公尺時是 1.5)：方塊被移回空中，從那裡重新落下。這是 Play 中改的值，停止 Play 後自動還原。
+
+### 現在應該看到
+
+- 方塊還在空中時，Console 沒有輸出。
+- 方塊落水的那一刻 Console 印一行 `WaterSplash: impact at (…)`，括號裡是落水處的 X、Z。
+- 方塊浮著、跟著浪起伏時，不再印 (底端一直在水面下)。
+- 把 Position Y 改回放手時的高度：方塊再落水一次，又印一行。
+- 水面上還看不到任何變化。
+
+<ex-fig of="water-splash-console-check" caption="示意：Console 的輸出隨時間" />
+
+| 看到的現象 | 原因通常是 | 怎麼修 |
+| --- | --- | --- |
+| Console 紅字 `The name 'WaterImpacts' does not exist` | `WaterImpacts.cs` 沒存，或 namespace 不是 `Water` | 對照上面的檔案 |
+| 落水沒有印 | `WaterSplash` 掛在別的物件上，不是方塊 | 掛到方塊上 |
+| 按下 Play 就印一行，落水時反而沒印 | Bottom 填成很大的負數，方塊還在空中時底端就算在水面下 | Bottom 改回 −0.5 |
+
+### 有事件，水面還沒畫
+
+到這裡，方塊每次落水，`_WaterImpacts` 裡就多一筆 (位置, 時間, 強度)，但水面 shader 還沒讀它。下一步在 shader 裡依這些事件畫出環。
+
+## 第二步：畫出擴散、淡掉的白色環帶
+
+### 每個像素自己算：離每一圈有多遠
+
+**每個像素看陣列裡的每一筆事件：過了多久、中線的半徑現在多大、自己離中線多遠、這一圈還剩多強。離中線夠近，就塗成白色。先畫白色環帶，是因為它最容易看出環在哪、多大、什麼時候消失；它本身也是這一章成品的一部分，下一步會留著。**
+
+<ex-fig of="impact-ring-anatomy-top-view" at="2" caption="示意：開頭那張圖 (強度 1、入水 1 秒) 標上這一步的符號與一個像素" />
+
+先用一筆真實的數字跑一次，就是圖上那一刻。方塊在第 10 秒落在 $\mathbf{c}_{\text{imp}} = (0, 0)$，強度 $q_{\text{imp}} = 1$。現在是第 11 秒，看兩個像素：
+
+| | 像素 $(0.8,\ 0)$ | 像素 $(1.0,\ 0)$ |
+| --- | --- | --- |
+| 過了多久 $a_{\text{imp}} = t - t_{\text{imp}}$ | $11 - 10 = 1$ 秒 | 1 秒 |
+| 中線的半徑 $R_{\text{ring}} = v_{\text{rip}}\,a_{\text{imp}}$ | $0.8 \times 1 = 0.8$ m | 0.8 m |
+| 離入水處 $r_{\text{imp}}$ | 0.8 m | 1.0 m |
+| 離中線 $\delta_{\text{ring}} = r_{\text{imp}} - R_{\text{ring}}$ | 0 | 0.2 m (外側) |
+| 剩下的強度 $q_{\text{ring}} = q_{\text{imp}}(1 - a_{\text{imp}}/T_{\text{life}})$ | $1 \times (1 - 1/2.5) = 0.6$ | 0.6 |
+| 白色環帶的半寬 $b_{\text{foam}}\,q_{\text{ring}}$ | $0.1 \times 0.6 = 0.06$ m | 0.06 m |
+| 白色嗎 | $\lvert 0 \rvert \le 0.06$：是 | $0.2 > 0.06$：不是 |
+
+整理成式子：
+
+$$f_{\text{imp}} = \begin{cases} 1 & \lvert \delta_{\text{ring}} \rvert \le b_{\text{foam}}\,q_{\text{ring}} \\ 0 & \text{otherwise} \end{cases}, \qquad \delta_{\text{ring}} = \lvert (x, z) - \mathbf{c}_{\text{imp}} \rvert - v_{\text{rip}}\,a_{\text{imp}}, \qquad q_{\text{ring}} = q_{\text{imp}}\left(1 - \frac{a_{\text{imp}}}{T_{\text{life}}}\right)$$
+
+| 符號 | 意思 | 預設 |
+| --- | --- | --- |
+| $(x, z)$ | 這個像素的 world position | |
+| $t$ | `_WaterTime` | |
+| $\mathbf{c}_{\text{imp}}$、$t_{\text{imp}}$、$q_{\text{imp}}$ | 這筆事件的位置、時間、強度 | |
+| $v_{\text{rip}}$ | 環往外擴散的速度，公尺 / 秒 | 0.8 |
+| $T_{\text{life}}$ | 壽命：過了這麼久，$q_{\text{ring}}$ 降到 0，環消失，秒 | 2.5 |
+| $b_{\text{foam}}$ | 強度 1 時白色環帶的半寬，公尺 | 0.1 |
+| $f_{\text{imp}}$ | 白色環帶的遮罩：1 是白色環帶，0 不是 | |
+
+<ex-fig of="impact-ring-top-view-ages" caption="示意：同一筆強度 1 的事件在三個時間點從上方看。中線越來越大，白色環帶越來越細" />
+
+- $q_{\text{ring}}$ 從 $q_{\text{imp}}$ 線性降到 0，白色環帶跟著從 20 公分寬細到消失，所以環不會一直留在水面上。2.5 秒時中線的半徑是 $0.8 \times 2.5 = 2$ 公尺。簡化：真的漣漪越往外越矮，是因為同樣的能量分到越來越長的圓周上，這裡只用時間線性淡掉。
+- 好幾筆事件時，每一筆各算一次，取最大的 $f_{\text{imp}}$：只要落在任何一圈上就是白的。
+
+白色環帶用「是或不是」的硬邊界，邊緣銳利、沒有半透明的過渡，和 [Depth Coloring「硬邊泡沫」](depth-coloring.html#硬邊泡沫)一樣是 low poly 的畫法。
+
+### 白色環帶沿用泡沫
+
+白色環帶就是一圈泡沫，所以不另外接顏色，直接併進現有的泡沫遮罩 $f$ (`SSG_Foam` 的 Foam)。$f$ 現在接到兩個地方 ([Refraction 第二步](refraction.html#第二步：換掉混色的方式))：泡沫色那個 Lerp 的 T (Base Color 換成 FoamColor)，和 One Minus (後方的畫面乘 $1 - f$，泡沫不透出湖底)。兩處都改接
+
+$$f' = \max(f,\ f_{\text{imp}})$$
+
+岸邊的泡沫和白色環帶就用同一套顏色與遮擋。`max` 對應 **Maximum** node (Create Node > Math > Range > Maximum)，輸入 A、B，輸出較大的那個。
+
+### ImpactRipples.hlsl：第一版
+
+要對 32 筆事件跑同一段計算，Shader Graph 的 node 沒有迴圈，所以寫成 Custom Function。檔案的格式 (開頭的註解、include guard、`_float` 後綴) 和 [Gerstner Waves](gerstner-waves.html#GerstnerWaves.hlsl-第一版) 的 `GerstnerWaves.hlsl` 相同，新的寫法在程式後面說明。
+
+在 `Assets/Water/Shaders/` 建立 `ImpactRipples.hlsl`：
+
+```hlsl Assets/Water/Shaders/ImpactRipples.hlsl (第二步的版本)
+//UNITY_SHADER_NO_UPGRADE
+#ifndef WATER_IMPACT_RIPPLES_INCLUDED
+#define WATER_IMPACT_RIPPLES_INCLUDED
+
+#define IMPACT_COUNT 32   // 和 WaterImpacts.Capacity 相同
+float4 _WaterImpacts[IMPACT_COUNT];
+
+void ImpactRipples_float(float3 PositionWS, float WaterTime, float4 Shape, float FoamWidth,
+                         out float Foam)
+{
+    Foam = 0;
+
+    for (int i = 0; i < IMPACT_COUNT; i++)
+    {
+        float4 impact = _WaterImpacts[i];
+        float age = WaterTime - impact.z;
+        if (impact.w <= 0 || age < 0 || age >= Shape.y)
+        {
+            continue;   // 空格、還沒發生、已經消失
+        }
+        float strength = impact.w * (1 - age / Shape.y);
+        float r = length(PositionWS.xz - impact.xy);
+        float delta = r - Shape.x * age;
+        Foam = max(Foam, step(abs(delta), FoamWidth * strength));
+    }
+}
+
+#endif // WATER_IMPACT_RIPPLES_INCLUDED
+```
+
+1. `#define IMPACT_COUNT 32`
+
+   定義一個名字，編譯前把檔案裡所有的 `IMPACT_COUNT` 換成 `32`。陣列大小要在編譯時就知道，所以用它，迴圈的上限也用它，兩處不會不一致。
+
+2. `float4 _WaterImpacts[IMPACT_COUNT];`
+
+   寫在函式外面，是全域變數：值不從 node 的輸入來，由 C# 的 `SetGlobalVectorArray` 用同一個名字寫入。
+
+3. `Shape` 與參數的對應
+
+   | 程式 | 符號 |
+   | --- | --- |
+   | `Shape.x` | $v_{\text{rip}}$ |
+   | `Shape.y` | $T_{\text{life}}$ |
+   | `Shape.z`、`Shape.w` | [第三步](#第三步：讓環成為水面的起伏)才用到 |
+   | `FoamWidth` | $b_{\text{foam}}$ |
+   | `impact.xy`、`impact.z`、`impact.w` | $\mathbf{c}_{\text{imp}}$、$t_{\text{imp}}$、$q_{\text{imp}}$ |
+   | `age`、`strength`、`delta` | $a_{\text{imp}}$、$q_{\text{ring}}$、$\delta_{\text{ring}}$ |
+
+4. `continue`
+
+   跳過這一圈的剩下部分，直接看下一筆。三種情形跳過：空格 ($q_{\text{imp}} = 0$)、還沒發生 (`age` 是負的)、已經過了壽命。
+
+5. 新的內建函式
+
+   | HLSL | 做什麼 | 例子 |
+   | --- | --- | --- |
+   | `length(v)` | 向量的長度 | `length(float2(0.6, 0.8))` = 1 |
+   | `abs(x)` | 絕對值 | `abs(-0.2)` = 0.2 |
+   | `step(edge, x)` | `x` 大於等於 `edge` 時是 1，否則 0 | `step(0.2, 0.06)` = 0 |
+
+   `step(abs(delta), FoamWidth * strength)` 就是上面 $f_{\text{imp}}$ 的條件：白色環帶的半寬大於等於 $\lvert \delta_{\text{ring}} \rvert$ 時是 1。
+
+### 在 Shader Graph 接出來
+
+1. 建立兩個 Property (Scope **Per Material**、Show In Inspector 勾選)
+
+   | Name | 型別 | Default Value |
+   | --- | --- | --- |
+   | `ImpactRipple` | Vector 4 | (0.8, 2.5, 0.3, 0.4) |
+   | `ImpactFoamWidth` | Float | 0.1 |
+
+   確認 Reference 是 `_ImpactRipple`、`_ImpactFoamWidth`。`ImpactRipple` 的四個分量依序是 $v_{\text{rip}}$、$T_{\text{life}}$，和[第三步](#第三步：讓環成為水面的起伏)才用到的兩個數字。
+
+2. 加入 Custom Function node，設定 Node Settings
+
+   | 欄位 | 值 |
+   | --- | --- |
+   | Type | **File** |
+   | Source | 把 `ImpactRipples.hlsl` 從 Project 視窗拖進來 |
+   | Name | `ImpactRipples` (不加 `_float`) |
+
+   | 清單 | 名稱 | Type |
+   | --- | --- | --- |
+   | Inputs | `PositionWS` | Vector 3 |
+   | Inputs | `WaterTime` | Float |
+   | Inputs | `Shape` | Vector 4 |
+   | Inputs | `FoamWidth` | Float |
+   | Outputs | `Foam` | Float |
+
+3. 接線
+
+   <ex-fig of="impact-ripples-graph" at="1" caption="第二步的 graph。綠框是新加的 node 與線；SSG_Foam、Lerp「泡沫色」、One Minus 只畫出這一步用到的接口" />
+
+   | node | 設定 | 輸入接什麼 | 算出 |
+   | --- | --- | --- | --- |
+   | Custom Function (ImpactRipples) | 上表 | PositionWS ← Position (Space：**World**，可以再拖一個進來)；WaterTime ← `WaterTime`；Shape ← `ImpactRipple`；FoamWidth ← `ImpactFoamWidth` | Foam = $f_{\text{imp}}$ |
+   | Maximum | | A ← `SSG_Foam` 的 Foam；B ← Custom Function 的 Foam | $f'$ |
+   | Lerp「泡沫色」(已有) | | T ← Maximum (取代原本 `SSG_Foam` 的線)；A、B 不變 | |
+   | One Minus (In 接著 `SSG_Foam` 的那個，已有) | | In ← Maximum (取代原本的線) | $1 - f'$ |
+
+4. 按 Save Asset
+
+5. 拿掉測試用的 Log
+
+   刪掉 `WaterSplash.cs` 裡 `Debug.Log` 那一行。
+
+### 現在應該看到
+
+- 方塊落水的地方出現一個小白點，長成一圈白色環帶往外擴散，越來越細，約 2.5 秒後在半徑 2 公尺左右消失。
+- 把 Position Y 改回放手時的高度，每次落水各一圈。
+- 白色環帶跟著大波浪起伏 (它畫在波浪上的像素上)，岸邊原本的泡沫不變。
+- 方塊浮著時沒有新的環 (偵測只看底端從水面上到水面下)。
+- 離得很遠時，快消失的白色環帶斷斷續續：它細到不到一個像素寬。
+
+<ex-fig of="impact-foam-ring-check" caption="示意：從上方看落水處" />
+
+| 看到的現象 | 原因通常是 | 怎麼修 |
+| --- | --- | --- |
+| node 有錯誤標記，Console 說找不到函式 | Name 多寫了 `_float`，或 Source 沒指定 | 照 Node Settings 的表重填 |
+| 錯誤訊息提到參數不符 | Inputs、Outputs 的順序或型別和函式不同 | 對照函式的參數逐一檢查 |
+| 落水沒有白色環帶，Console 有印 impact | Custom Function 的 Foam 沒接進 Maximum，或 Maximum 沒接到 Lerp 的 T | 照表接 |
+| 白色環帶出現了，但後面透出湖底 | One Minus 還接著 `SSG_Foam` | One Minus 的 In ← Maximum |
+| 白色環帶不會長大，停在落水處 | `ImpactRipple` 的 Default Value 沒填 ($v_{\text{rip}} = 0$) | 填 (0.8, 2.5, 0.3, 0.4) |
+| 整片水面看不到白色環帶，Shape 也填了 | WaterTime 沒接 (0)，`age` 一直是負的 | WaterTime ← `WaterTime` |
+| 白色環帶一直不消失 | `ImpactRipple` 的 $y$ 填得很大 | 改回 2.5 |
+
+### 白色環帶像畫上去的
+
+到這裡，落水處有一圈往外長大、慢慢變細的白色環帶，位置與時機都對了。但它像用筆畫在水面上的一條線：環經過的地方，太陽的反光、天空的倒影、水下的湖底都紋風不動，水面本身沒有起伏。真的漣漪看得見，是因為水面被推起一道隆起，隆起兩側斜的水面把光往別的方向反射、折射。所以下一步讓這一圈有起伏。
+
+## 第三步：讓環成為水面的起伏
+
+### 只改 normal，不移動 vertex
+
+**環的隆起只有約 0.6 公尺寬，水面 mesh 每格 0.3 公尺，整道隆起只跨兩格，而且環一直在往外移，vertex 跟不出它的形狀 (見 [Shader Basics「mesh 太疏時，波浪會有稜角」](shader-basics.html#mesh-太疏時，波浪會有稜角))。所以和 [Flow Normals](flow-normals.html) 的細波紋一樣，只改每個像素的 normal：先寫出一道隆起的高度，對距離微分得到沿半徑方向的斜率，再從沿半徑方向的斜率算出 normal，和細波紋的 normal 疊在一起。**
+
+<ex-fig of="impact-ring-cross-section" caption="示意：入水 1 秒後沿半徑切開的剖面，高度放大。白色環帶在隆起的頂上" />
+
+### 一道隆起的高度與沿半徑方向的斜率
+
+隆起以中線為中心，往內、往外各 $W_{\text{ring}}$ 公尺。取 cosine 從谷到谷的一個週期，往上平移讓谷底落在 0，就是一道兩端平順降到 0 的隆起：
+
+$$h_{\text{ring}}(\delta_{\text{ring}}) = \begin{cases} \dfrac{q_{\text{ring}}\,s_{\text{ring}}\,W_{\text{ring}}}{\pi}\left(1 + \cos\dfrac{\pi\,\delta_{\text{ring}}}{W_{\text{ring}}}\right) & \lvert \delta_{\text{ring}} \rvert < W_{\text{ring}} \\ 0 & \text{otherwise} \end{cases}$$
+
+| 符號 | 意思 | 預設 |
+| --- | --- | --- |
+| $W_{\text{ring}}$ | 環的半寬：中線往內、往外各幾公尺有起伏 | 0.3 |
+| $s_{\text{ring}}$ | 強度 1 時最陡處沿半徑方向的斜率 | 0.4 (約 22 度) |
+
+在 $\delta_{\text{ring}} = \pm W_{\text{ring}}$ 時 $\cos$ 是 −1，高度降到 0，和外面平的水面接得起來；中線上最高，強度 1 時是 $2 \times 0.4 \times 0.3 / \pi \approx 0.076$ 公尺。這個高度不會真的去推 vertex，只用來算沿半徑方向的斜率。沿半徑方向的斜率是高度隨 $\delta_{\text{ring}}$ 的變化率 (微分)；因為 $\delta_{\text{ring}}$ 沿半徑往外每走 1 公尺就加 1，它就是水面高度沿半徑方向的方向導數：
+
+$$h'_{\text{ring}}(\delta_{\text{ring}}) = -\,q_{\text{ring}}\,s_{\text{ring}}\,\sin\frac{\pi\,\delta_{\text{ring}}}{W_{\text{ring}}}$$
+
+中線上 ($\delta_{\text{ring}} = 0$) $h'_{\text{ring}}$ 是 0，是頂；外側 ($\delta_{\text{ring}} > 0$) 是負的，往外下降；內側是正的，往內下降。最陡處在 $\delta_{\text{ring}} = \pm W_{\text{ring}}/2$，大小是 $q_{\text{ring}}\,s_{\text{ring}}$：所以 $s_{\text{ring}}$ 直接就是強度 1 時最陡處的沿半徑方向的斜率，隆起隨強度淡掉跟著變緩。
+
+### 從沿半徑方向的斜率到 normal
+
+[Gerstner Waves](gerstner-waves.html#兩條-tangent-cross-得到-normal) 用兩條 tangent 的 cross 求 normal。水面高度是 $h(x, z)$ 時，水面上的點是 $P = (x,\ h(x, z),\ z)$。$h$ 是定義在整個 xz 平面上的連續函式，和 vertex 排在哪裡無關，每個像素代入自己的 world $(x, z)$ 就有值；環只改高度、點不水平移動，所以參數直接用 world 的 $x$、$z$。沿 $x$、沿 $z$ 的 tangent 是
+
+$$\frac{\partial P}{\partial x} = \left(1,\ \frac{\partial h}{\partial x},\ 0\right), \qquad \frac{\partial P}{\partial z} = \left(0,\ \frac{\partial h}{\partial z},\ 1\right)$$
+
+照 `GerstnerWaves.hlsl` 的順序 cross：
+
+$$(0,\ \tfrac{\partial h}{\partial z},\ 1) \times (1,\ \tfrac{\partial h}{\partial x},\ 0) = \left(-\frac{\partial h}{\partial x},\ 1,\ -\frac{\partial h}{\partial z}\right)$$
+
+細波紋接的是 tangent space 的 normal：平的水面上 $T$ 是世界的 $+x$、$B$ 是 $+z$、$N$ 朝上 ([Flow Normals「B 從哪裡來」](flow-normals.html#B-從哪裡來：mesh-要存-tangent))，所以同一個方向在 tangent space 寫成
+
+$$\mathbf{n}_{\text{imp}} = \operatorname{normalize}\left(-\frac{\partial h}{\partial x},\ -\frac{\partial h}{\partial z},\ 1\right)$$
+
+環的高度只看 $r_{\text{imp}}$ (離入水處的距離)，等高線是以入水處為圓心的同心圓。因為 gradient 垂直於等高線，所以 $\nabla h$ 和從入水處指向這個像素、長度 1 的方向 $\mathbf{u}_r$ 共線；因為 $\mathbf{u}_r$ 長度 1，所以 $\nabla h \cdot \mathbf{u}_r$ 就是 $\nabla h$ 帶正負號的長度，也就是沿半徑方向的方向導數 $h'_{\text{ring}}$：
+
+$$\mathbf{u}_r = \frac{(x, z) - \mathbf{c}_{\text{imp}}}{r_{\text{imp}}}, \qquad \nabla h = \left(\frac{\partial h}{\partial x},\ \frac{\partial h}{\partial z}\right) = h'_{\text{ring}}(\delta_{\text{ring}})\,\mathbf{u}_r$$
+
+外側 $h'_{\text{ring}} < 0$，$\nabla h$ 指回入水處，往內是上坡。好幾圈時，高度相加，gradient 也就相加：每一筆事件算出自己的 $\nabla h$，全部加起來再算一次 $\mathbf{n}_{\text{imp}}$。
+
+接著第二步的例子：第 11 秒的像素 $(1.0,\ 0)$，$\delta_{\text{ring}} = 0.2$、$q_{\text{ring}} = 0.6$：
+
+- 沿半徑方向的斜率：$h'_{\text{ring}} = -0.6 \times 0.4 \times \sin(\pi \times 0.2 / 0.3) \approx -0.24 \times 0.866 \approx -0.208$
+- 方向：$\mathbf{u}_r = ((1.0,\ 0) - (0,\ 0)) / 1.0 = (1,\ 0)$，所以 $\nabla h = (-0.208,\ 0)$
+- normal：$\operatorname{normalize}(0.208,\ 0,\ 1) \approx (0.204,\ 0,\ 0.979)$，往 $+x$ (環的外側) 倒約 12 度
+
+### ImpactRipples.hlsl：第二版
+
+```hlsl Assets/Water/Shaders/ImpactRipples.hlsl (第三步的版本)
+//UNITY_SHADER_NO_UPGRADE
+#ifndef WATER_IMPACT_RIPPLES_INCLUDED
+#define WATER_IMPACT_RIPPLES_INCLUDED
+
+// 入水的漣漪：每筆入水事件一圈往外擴散、慢慢淡掉的環。只改 normal 與泡沫遮罩，不移動 vertex。
+// 事件由 C# 的 WaterImpacts 用 Shader.SetGlobalVectorArray 寫進 _WaterImpacts (全域變數，所有湖共用)。
+// 每筆一個 float4：x、y = 入水的位置 (世界的 X、Z)，z = 入水的時間 (和 _WaterTime 同一個時鐘)，w = 強度 0 到 1 (0 是空格)
+#define IMPACT_COUNT 32   // 和 WaterImpacts.Capacity 相同
+float4 _WaterImpacts[IMPACT_COUNT];
+
+// Shape：x = 往外擴散的速度 (公尺 / 秒)，y = 壽命 (秒)，z = 環的半寬 (公尺)，w = 強度 1 時最陡處沿半徑方向的斜率
+// FoamWidth：強度 1 時白色環帶的半寬 (公尺)
+// Foam：白色環帶的遮罩 (0 或 1)；NormalTS：所有環疊起來的 normal (tangent space)
+void ImpactRipples_float(float3 PositionWS, float WaterTime, float4 Shape, float FoamWidth,
+                         out float Foam, out float3 NormalTS)
+{
+    float2 slope = float2(0, 0);   // 所有環在這一點的 gradient (∂h/∂x, ∂h/∂z) 加總
+    Foam = 0;
+
+    for (int i = 0; i < IMPACT_COUNT; i++)
+    {
+        float4 impact = _WaterImpacts[i];
+        float age = WaterTime - impact.z;
+        if (impact.w <= 0 || age < 0 || age >= Shape.y)
+        {
+            continue;   // 空格、還沒發生、已經消失
+        }
+        float strength = impact.w * (1 - age / Shape.y);   // 這一環現在的強度：壽命內從 impact.w 線性降到 0
+        float2 offset = PositionWS.xz - impact.xy;
+        float r = length(offset);
+        float delta = r - Shape.x * age;                     // 離環的中線多遠：正的在外側
+
+        Foam = max(Foam, step(abs(delta), FoamWidth * strength));
+
+        if (abs(delta) < Shape.z)
+        {
+            float dhdr = -strength * Shape.w * sin(3.14159265 * delta / Shape.z);   // 沿半徑方向的斜率
+            slope += dhdr * offset / max(r, 0.0001);                             // 分到 x、z
+        }
+    }
+
+    NormalTS = normalize(float3(-slope.x, -slope.y, 1));
+}
+
+#endif // WATER_IMPACT_RIPPLES_INCLUDED
+```
+
+和第一版比：
+
+- 多一個輸出 `NormalTS`，就是 $\mathbf{n}_{\text{imp}}$。`Shape.z` 是 $W_{\text{ring}}$、`Shape.w` 是 $s_{\text{ring}}$，`dhdr` 是 $h'_{\text{ring}}$，`slope` 累加每一圈的 $\nabla h$。
+- gradient 只在隆起的範圍內 ($\lvert \delta_{\text{ring}} \rvert < W_{\text{ring}}$) 才加，外面是平的。
+- `max(r, 0.0001)`：正好在入水處時 $r_{\text{imp}} = 0$，除以它會變成無限大；這一點本來就在環的正中間、gradient 是 0，墊一個很小的數避開除以 0。
+- 沒有任何一圈經過的像素，`slope` 是 0，`NormalTS` 是 $(0, 0, 1)$，不傾斜。
+- 檔案開頭補上說明格式的註解。
+
+### 和細波紋疊在一起
+
+$\mathbf{n}_{\text{imp}}$ 和細波紋的 normal $\mathbf{n}$ (接 Normal block 的那個 Normal Strength 的輸出) 都是 tangent space 的 normal，用 [Flow Normals 第四步](flow-normals.html#第四步：第二層波紋)的 **Normal Blend** 疊：
+
+$$\mathbf{n}_{\text{out}} = \operatorname{normalize}\big(n_x + n_{\text{imp},x},\ \ n_y + n_{\text{imp},y},\ \ n_z\,n_{\text{imp},z}\big)$$
+
+細波紋的 normal 現在接到兩個地方 ([Reflection「收成 SSG_Fresnel」](reflection.html#收成-SSG_Fresnel))，兩處都改接 $\mathbf{n}_{\text{out}}$：
+
+1. Normal block：Lit 打光與反射用它，太陽的亮點和天空的倒影才會跟著環彎。
+2. Transform 的 In ([Refraction 第六步](refraction.html#第六步：讓大浪也偏折)放在主 graph 的那個)：它的輸出 $\mathbf{n}_{\text{ws}}$ 接 `SSG_Refraction_UV` 和 `SSG_Fresnel` 的 NormalWS，所以水下的湖底跟著環扭曲，反射比例也用 Lit 算反射的同一個 normal ([Reflection「normal 用含細波紋的那一個」](reflection.html#normal-用含細波紋的那一個))。
+
+### 改 graph
+
+1. 改 Custom Function 的埠
+
+   Outputs 在 Foam 後面加一個：`NormalTS`，Type **Vector 3**。
+
+2. 接線
+
+   <ex-fig of="impact-ripples-graph" at="2" caption="第三步的 graph。綠框是新加的 node 與線；兩處原本都接細波紋的 Normal Strength" />
+
+   | node | 設定 | 輸入接什麼 |
+   | --- | --- | --- |
+   | Normal Blend | Mode：**Default** | A ← Normal Strength (細波紋，接 Normal block 的那個)；B ← Custom Function 的 NormalTS |
+   | Fragment 的 Normal (Tangent Space) | | ← Normal Blend (取代原本的線) |
+   | Transform (接 `SSG_Refraction_UV` 與 `SSG_Fresnel` 的 NormalWS 的那個) | | In ← Normal Blend (取代原本的線) |
+
+3. 按 Save Asset
+
+### 現在應該看到
+
+照 [Flow Normals「先把太陽轉到低角度」](flow-normals.html#先把太陽轉到低角度)把 Directional Light 轉到 (20, 90, 0)、站在湖的 $+x$ 側面向 $-x$ 看，比較容易看清楚；看完改回原本的值。
+
+- 方塊落水：落水處的環有了起伏，面向太陽的那一側亮、背向的一側暗，亮暗兩道跟著環往外擴散；白色環帶在兩道之間。
+- 環經過的地方，天空的倒影與太陽的碎亮點被推開、彎成弧；俯視時，環底下的湖底跟著晃一下。
+- 環越往外越淡，消失前已經看不太出起伏。
+- 沒有環的地方，和上一步完全一樣。
+
+<ex-fig of="impact-ripple-normal-check" caption="示意：從上方看，陽光從左邊來" />
+
+| 看到的現象 | 原因通常是 | 怎麼修 |
+| --- | --- | --- |
+| 只有白色環帶，沒有起伏 | Normal Blend 沒接到 Normal block，或 B 沒接 NormalTS | 照表接 |
+| 整片水面的細波紋不見了 | Normal Blend 的 A 沒接 (用的是平的 normal) | A ← 細波紋的 Normal Strength |
+| 環有起伏，但湖底不跟著晃 | Transform 的 In 還接著 Normal Strength | 改接 Normal Blend |
+| 亮暗方向反了 (背光側亮) | 程式裡 `NormalTS` 的負號漏寫 | 對照程式：`float3(-slope.x, -slope.y, 1)` |
+| 環的起伏太強或太弱 | `ImpactRipple` 的 $w$ ($s_{\text{ring}}$) | 調整；0.4 是預設 |
+
+### ImpactRipple 搬進設定資產
+
+和前面幾章一樣，參數的來源是設定資產 `SO_LakeWater`，流程同 [Flow Normals 第六步](flow-normals.html#第六步：把新參數搬進設定資產)。完整檔案在教材 GitHub repo 的 [`Assets/Water/Scripts/WaterSettings.cs`](https://github.com/RogelioKG/explain-waterbody/blob/main/urp-water/unity/Assets/Water/Scripts/WaterSettings.cs) 與 [`WaterBody.cs`](https://github.com/RogelioKG/explain-waterbody/blob/main/urp-water/unity/Assets/Water/Scripts/WaterBody.cs)。新增的部分 (`…` 是沒變的部分)：
+
+```csharp Assets/Water/Scripts/WaterSettings.cs 這一章新增的部分
+public const float MinImpactRippleLifetime = 0.1f;
+public const float MinImpactRippleWidth = 0.01f;
+…
+public float impactRippleSpeed = 0.8f;     // 入水的漣漪往外擴散的速度，公尺 / 秒
+public float impactRippleLifetime = 2.5f;  // 漣漪幾秒後完全消失
+public float impactRippleWidth = 0.3f;     // 環的半寬：環的中線往內、往外各幾公尺有起伏
+public float impactRippleSlope = 0.4f;     // 強度 1 的環最陡處沿半徑方向的斜率 (0.4 約 22 度)
+public float impactFoamWidth = 0.1f;       // 強度 1 時白色環帶的半寬，公尺；0 是沒有白環
+…
+// 入水的漣漪排成 shader 要的 Vector4：(擴散速度, 壽命, 半寬, 最陡處沿半徑方向的斜率)。
+// graph 裡會除以壽命與半寬，不能是 0；速度、沿半徑方向的斜率是負數沒有意義，當成 0。
+public Vector4 GetPackedImpactRipple()
+{
+    return new Vector4(
+        Mathf.Max(impactRippleSpeed, 0f),
+        Mathf.Max(impactRippleLifetime, MinImpactRippleLifetime),
+        Mathf.Max(impactRippleWidth, MinImpactRippleWidth),
+        Mathf.Max(impactRippleSlope, 0f));
+}
+…
+public float ImpactFoamWidth => Mathf.Max(impactFoamWidth, 0f);
+```
+
+```csharp Assets/Water/Scripts/WaterBody.cs 這一章新增的部分
+static readonly int ImpactRippleId = Shader.PropertyToID("_ImpactRipple");
+static readonly int ImpactFoamWidthId = Shader.PropertyToID("_ImpactFoamWidth");
+…
+void WriteMaterial()
+{
+    …
+    material.SetFloat(CausticStrengthId, settings.CausticStrength);
+    material.SetVector(ImpactRippleId, settings.GetPackedImpactRipple());
+    material.SetFloat(ImpactFoamWidthId, settings.ImpactFoamWidth);
+}
+```
+
+`GetPackedImpactRipple` 把四個欄位排成 `ImpactRipple` 的 (速度, 壽命, 環的半寬, 最陡處沿半徑方向的斜率)。壽命與環的半寬在 shader 裡是除數，所以至少 0.1 秒、0.01 公尺。兩個檔案開頭的註解也加上「入水的漣漪」。
+
+`_WaterImpacts` 不在這裡：它是全域變數，由 `WaterImpacts` 寫。
+
+### 現在應該看到
+
+- `SO_LakeWater` 的 Inspector 在 Caustic Strength 下面多了 Impact Ripple Speed、Lifetime、Width、Slope 與 Impact Foam Width，值是預設值。
+- 在設定資產把 Impact Ripple Speed 改成 2：環擴散得快很多，消失時半徑約 5 公尺。看完改回 0.8。
+- Impact Foam Width 改成 0：沒有白色環帶，只剩起伏。看完改回 0.1。
+
+<ex-fig of="impact-ripple-settings-inspector" caption="示意：只畫最後幾個欄位" />
+
+| 看到的現象 | 原因通常是 | 怎麼修 |
+| --- | --- | --- |
+| 改設定資產沒反應 | graph 的 Reference 和 C# 的名字不同 | 對照 `_ImpactRipple`、`_ImpactFoamWidth` |
+| 掛上新程式後沒有環 | 設定資產的新欄位是 0 (壽命被修正成 0.1 秒，一閃就沒) | 照上面的初始值填入 |
+
+### 只有落水那一下
+
+到這裡，方塊落水會激起一圈有起伏、有白色環帶的漣漪。但只有「底端從水面上到水面下」這一種情形會記事件：物體整個沉下去、再浮上來、離開水面、半泡在水裡被拖著走，水面都沒反應；角色走進湖裡也一樣，因為角色身上根本沒有 `WaterSplash`。下一步讓 `WaterSplash` 認得更多種穿過水面的方式，再掛到角色上。
+
+## 第四步：沉下去、浮上來、走過水面
+
+### 數一數有幾端在水面下
+
+**物體有底端和頂端兩個端點。每一格數它們有幾個在水面下：0 是整個在水面上，1 是半泡在水裡，2 是整個在水下。數目改變，就是有一端剛穿過水面，記一筆；停在 1 的時候，物體一邊移動一邊推開水面，水平每走一段距離記一筆。落水、整個沉下去、浮上來、離開水面、在水裡走動，全部由這兩條規則涵蓋。涉水時環一圈接一圈地冒，所以這種事件只留起伏、不畫白色環帶。**
+
+<ex-fig of="water-splash-ends-below" caption="WaterSplash 依「幾端在水面下」決定什麼時候記事件" />
+
+| 數目的變化 | 例子 |
+| --- | --- |
+| 0 → 1 或 2 | 方塊落水；角色從岸上走進水裡 |
+| 1 → 2 | 角色走到頭沒入水面；從更高處落下的方塊整顆沒入 |
+| 2 → 1 | 角色往回走，頭露出水面；沒入的方塊浮上來 |
+| 1 → 0 | 角色走上岸；方塊被移回空中 |
+| 停在 1，水平移動 | 角色涉水 |
+
+方塊浮著、跟著浪起伏時，水線只在側面上下移動，底端一直在水面下、頂端一直在水面上，數目停在 1；`Buoyancy` 的浮力只往上推，方塊幾乎不水平移動，所以也不會每走一段記一筆。
+
+### 強度看穿過水面時有多快
+
+方塊從 1 公尺高處掉進水裡，和角色慢慢走進淺灘，水面的反應不該一樣。所以數目改變時，強度看物體上下的速度 $u_{\text{vert}}$ (公尺 / 秒)：
+
+$$q_{\text{imp}} = \operatorname{lerp}\left(q_{\min},\ 1,\ \operatorname{saturate}\left(\frac{u_{\text{vert}}}{u_{\text{full}}}\right)\right)$$
+
+| 符號 | 意思 | 預設 |
+| --- | --- | --- |
+| $q_{\min}$ | 最小強度：慢慢走進水裡也看得到一圈 | 0.3 |
+| $u_{\text{full}}$ | 上下的速度到多少時強度是 1 | 5 公尺 / 秒 |
+
+| 情形 | $u_{\text{vert}}$ | $q_{\text{imp}}$ |
+| --- | --- | --- |
+| 方塊落水 (底面離水面 1 公尺放手) | $\sqrt{2 \times 9.81 \times 1} \approx 4.4$ | $0.3 + 0.7 \times 4.4 / 5 \approx 0.92$ |
+| 角色走下緩坡進水 | 很小 | 接近 0.3 |
+| 方塊從底面離水面 3 公尺放手，頂端沒入時 | 約 3.4 | $0.3 + 0.7 \times 3.4 / 5 \approx 0.78$ |
+| 同一顆方塊浮上來，頂端露出時 | 約 1.1 | 約 0.45 |
+
+方塊落水的速度是自由落下 1 公尺 (底面碰到水之前只有重力)。從 1 公尺放手時，靜止的水面上方塊最深沉到頂面還露出約 8 公分，頂端不會沒入；放到 3 公尺，最深時頂面在水面下約 19 公分，才有後兩列。這兩列的速度是用 `Buoyancy` 的算法模擬出來的 (見「來源」)。
+
+$q_{\text{imp}}$ 是 [第二步](#第二步：畫出擴散、淡掉的白色環帶)的入水強度，所以角色走進水裡的那一圈 ($q_{\text{imp}} = 0.3$)，最陡處沿半徑方向的斜率只有 $0.3 \times 0.4 = 0.12$，比方塊落水的那一圈 ($0.92 \times 0.4 \approx 0.37$) 緩得多。
+
+上下的速度從哪裡讀：物體有 Rigidbody (方塊、丟進湖裡的石頭) 就讀它的 `linearVelocity.y`；沒有 (例如用 CharacterController 走路的角色)，就用這一格和上一格的高度差除以 `Time.deltaTime`。`GetComponent<Rigidbody>()` 在物體沒有 Rigidbody 時回傳 `null`，用它判斷走哪一條。
+
+### 走過水面：每走一段記一筆
+
+停在 1 的時候，把這一格水平移動的距離累加起來，到了 `stepDistance` (預設 0.75 公尺) 就記一筆強度 `stepStrength` (預設 0.4) 的事件，歸零重算。
+
+為什麼看距離、不看時間：站著不動時水面沒被推開，不該冒環；走得越快，推開的水越多，環就該越密。角色涉水時中線的半徑每秒增加 0.8 公尺，人走得比這快，所以新的環一直冒在舊環的前面，在身後連成一串。
+
+### 涉水的環只要起伏
+
+照上面的規則，角色以每秒 1.5 公尺涉水，每秒冒 $1.5 / 0.75 = 2$ 圈，每圈活 2.5 秒，水面上同時有 $2 \times 2.5 = 5$ 圈。每圈一開始就有 $2 \times 0.1 \times 0.4 = 8$ 公分寬的硬邊白色環帶，在身後連成一串白圈，很突兀。因為真實的泡沫留在被攪動的地方慢慢散掉，不會跟著波往外走，所以涉水的事件只有起伏、沒有白色環帶。
+
+角色走進水裡、頭沒入或露出水面，也是走路途中慢慢推開水面，和涉水是同一種動作；方塊、浮標落水則是砸進水裡。所以穿過水面的事件要不要白色環帶，由每個物體自己決定：`WaterSplash` 多一個勾選欄位 Foam，方塊勾著 (預設)，角色取消勾選。
+
+| 事件 | 白色環帶 |
+| --- | --- |
+| 穿過水面 | 看 `WaterSplash` 的 Foam |
+| 停在 1，水平每走一段 | 沒有 |
+
+因為方塊從 3 公尺放手後浮上來的那一圈約 0.45、涉水的 0.4，大小切不開，所以不用強度的大小區分 (例如低於 0.5 就不畫)。
+
+### 用強度的正負號記下要不要白色環帶
+
+shader 要知道每一筆事件畫不畫白色環帶，但每筆事件的 `Vector4` 四格已經放滿 (位置兩格、時間、強度)。強度一定大於 0 (`Add` 把 0 以下的擋掉)，正負號沒用到，所以借它來記：
+
+| `impact.w` | 強度 $q_{\text{imp}}$ | 白色環帶 |
+| --- | --- | --- |
+| 正數 | `impact.w` | 有 |
+| 負數 | `abs(impact.w)` | 沒有 |
+| 0 | 0 (空格) | 沒有 |
+
+正負號只在 `WaterImpacts` 裡面用；呼叫的程式傳一個 `bool foam`，預設 `true`，所以只傳位置與強度的呼叫照舊有白色環帶。
+
+```csharp Assets/Water/Scripts/WaterImpacts.cs WaterImpacts.Add (最後的版本)
+// 新增一筆入水事件。position 只用 x、z；strength 0 到 1，越大漣漪越明顯，0 以下不記。
+// foam = false 時只有起伏、沒有白色環帶 (例如涉水時每走一段記的那幾筆)。
+public static void Add(Vector3 position, float strength, bool foam = true)
+{
+    if (strength <= 0f)
+    {
+        return;
+    }
+    // 沒有白色環帶的事件，強度存成負數：shader 用絕對值當強度，正負號決定要不要白色環帶
+    float w = foam ? Mathf.Clamp01(strength) : -Mathf.Clamp01(strength);
+    // 時間用 Time.time：Play 中 WaterBody 寫進 _WaterTime 的也是它，shader 才算得出事件過了多久
+    impacts[next] = new Vector4(position.x, position.z, Time.time, w);
+    next = (next + 1) % Capacity;
+    Shader.SetGlobalVectorArray(WaterImpactsId, impacts);
+}
+```
+
+強度先夾在 0 到 1 再決定正負號，所以 `impact.w` 在 −1 到 1 之間，絕對值就是 $q_{\text{imp}}$。
+
+### ImpactRipples.hlsl：最後的版本
+
+shader 改三處：
+
+- 空格改用 `impact.w == 0` 判斷：因為原本的 `impact.w <= 0` 會把負數的事件當成空格跳過。
+- 強度取絕對值。
+- 只有 `impact.w > 0` 的事件畫白色環帶；起伏照算，所以只有起伏的環一樣推開光影。
+
+```hlsl Assets/Water/Shaders/ImpactRipples.hlsl (最後的版本，只列和第二版不同的部分)
+// 每筆一個 float4：x、y = 入水的位置 (世界的 X、Z)，z = 入水的時間 (和 _WaterTime 同一個時鐘)，w = 強度 (0 是空格；負數是只有起伏、沒有白色環帶的事件，強度取絕對值)
+…
+    for (int i = 0; i < IMPACT_COUNT; i++)
+    {
+        float4 impact = _WaterImpacts[i];
+        float age = WaterTime - impact.z;
+        if (impact.w == 0 || age < 0 || age >= Shape.y)
+        {
+            continue;   // 空格、還沒發生、已經消失
+        }
+        float strength = abs(impact.w) * (1 - age / Shape.y);   // 這一環現在的強度：壽命內從 |impact.w| 線性降到 0
+        …
+        float foam = impact.w > 0 ? step(abs(delta), FoamWidth * strength) : 0;   // 負數的事件沒有白色環帶
+        Foam = max(Foam, foam);
+        …
+    }
+…
+```
+
+- `條件 ? a : b` 和 C# 一樣：條件成立取 `a`，否則取 `b`。
+- [第二步](#ImpactRipples.hlsl：第一版)的對應表裡 $q_{\text{imp}}$ 是 `impact.w`，現在是 `abs(impact.w)`。
+
+### WaterSplash.cs：第二版
+
+```csharp Assets/Water/Scripts/WaterSplash.cs WaterSplash (第四步的版本)
+using UnityEngine;
+
+namespace Water
+{
+    // 掛在會穿過水面的物體上 (方塊、你的角色、丟進湖裡的石頭)，在這些時候新增入水事件 (WaterImpacts.Add)：
+    //   底端或頂端穿過水面 (落水、整個沉下去、浮上來、離開水面)：強度看上下的速度，foam 決定有沒有白色環帶。
+    //   水面在底端與頂端之間 (半泡在水裡) 時：水平每移動 stepDistance 新增一筆，只有起伏、沒有白色環帶。
+    // 底端、頂端是物體的位置往上幾公尺 (world Y)，不跟著物體旋轉。
+    public class WaterSplash : MonoBehaviour
+    {
+        [SerializeField] float bottom = -0.5f;           // 底端：位置往上幾公尺 (在位置下方就填負數)
+        [SerializeField] float top = 0.5f;               // 頂端：位置往上幾公尺
+
+        [Header("Ripples")]
+        [SerializeField] bool foam = true;               // 穿過水面時有沒有白色環帶 (角色可以取消勾選)
+        [SerializeField] float minStrength = 0.3f;       // 穿過水面時的最小強度 (慢慢走進水裡)
+        [SerializeField] float fullStrengthSpeed = 5f;   // 上下的速度到幾公尺 / 秒時強度是 1
+        [SerializeField] float stepDistance = 0.75f;     // 半泡在水裡時，水平每移動幾公尺新增一筆
+        [SerializeField] float stepStrength = 0.4f;      // 這種事件的強度 (只有起伏，沒有白色環帶)
+
+        Rigidbody body;         // 有的話，上下的速度直接讀它
+        int endsBelow;          // 底端、頂端有幾個在水面下：0、1、2
+        Vector3 lastPosition;
+        float moved;            // 半泡在水裡時，上一筆之後水平走了多遠
+
+        void Awake()
+        {
+            body = GetComponent<Rigidbody>();
+        }
+
+        void Start()
+        {
+            lastPosition = transform.position;
+            endsBelow = CountEndsBelow(lastPosition, out _);
+        }
+
+        void Update()
+        {
+            Vector3 position = transform.position;
+            int below = CountEndsBelow(position, out float surface);
+            Vector3 point = new Vector3(position.x, surface, position.z);
+
+            if (below != endsBelow)
+            {
+                float strength = Mathf.Lerp(minStrength, 1f, VerticalSpeed(position) / fullStrengthSpeed);
+                WaterImpacts.Add(point, strength, foam);
+                moved = 0f;
+            }
+            else if (below == 1)
+            {
+                Vector3 step = position - lastPosition;
+                moved += new Vector2(step.x, step.z).magnitude;
+                if (moved >= stepDistance)
+                {
+                    WaterImpacts.Add(point, stepStrength, false);
+                    moved = 0f;
+                }
+            }
+
+            endsBelow = below;
+            lastPosition = position;
+        }
+
+        // 底端、頂端有幾個低於這裡的水面；不在任何一片湖上時是 0。surface 是這裡的水面高度。
+        int CountEndsBelow(Vector3 position, out float surface)
+        {
+            surface = position.y;
+            if (!WaterBody.TryFind(position, out WaterBody water))
+            {
+                return 0;
+            }
+            surface = water.GetSurfaceHeight(position);
+            int count = 0;
+            if (position.y + bottom < surface)
+            {
+                count++;
+            }
+            if (position.y + top < surface)
+            {
+                count++;
+            }
+            return count;
+        }
+
+        // 有 Rigidbody 就讀它的速度；沒有 (例如用 CharacterController 走的角色) 就用這一格移動的距離算。
+        float VerticalSpeed(Vector3 position)
+        {
+            if (body != null)
+            {
+                return Mathf.Abs(body.linearVelocity.y);
+            }
+            return Time.deltaTime > 0f ? Mathf.Abs(position.y - lastPosition.y) / Time.deltaTime : 0f;
+        }
+    }
+}
+```
+
+- `Start` 先數一次，所以物體一開始就在水裡時不會多記一筆。
+- 事件的位置用這裡的水面高度 (`point`)：`Add` 只用 $x$、$z$，高度留著給[第五步](#第五步：入水時噴水花)的水花用。
+- `Mathf.Lerp(a, b, t)` 的 `t` 超過 1 時當成 1，所以就是上面 $q_{\text{imp}}$ 的式子，`saturate` 不必另外寫。
+- 穿過水面的那筆傳 `foam` 欄位，涉水的那筆一律傳 `false`。
+- `CountEndsBelow` 的 `out float surface`：除了回傳數目，順便把查到的水面高度交出來，不必再查一次。不在任何一片湖上時，數目是 0，等於在水面上。
+
+### 掛到角色上
+
+方塊上的 `WaterSplash` 存檔後多了幾個欄位，Top 用預設的 0.5 (方塊的頂端)，Foam 維持勾選，其他都用預設。
+
+選取你的角色的根物件 (掛著移動用元件的那個，不是骨架裡的骨頭)，**Add Component** > **Water Splash**，照下表填：
+
+| 欄位 | 怎麼填 |
+| --- | --- |
+| Bottom | 腳底在根物件位置往上幾公尺；根物件的原點在腳底時填 0 |
+| Top | 頭頂在根物件位置往上幾公尺，例如身高 1.8 公尺填 1.8 |
+| Foam | 取消勾選：角色的環都只有起伏 ([「涉水的環只要起伏」](#涉水的環只要起伏)) |
+
+其他欄位用預設。
+
+### 現在應該看到
+
+- 方塊落水：落水處一圈明顯的環，比上一步的那圈稍淡 (強度約 0.92)；浮著時不再冒。碰上浪時頂端偶爾也沒入，多冒一圈較淡的。
+- 把 Position Y 改回放手時的高度：方塊離開水面的那一下，原處冒一圈淡的 (1 → 0)；落水時再一圈。
+- Position Y 改成 3.5 (底面離水面 3 公尺)：落水那一圈之後約 0.2 秒頂端也沒入，再約 0.4 秒浮上來，落水後同一處共冒三圈，一圈比一圈淡，幾乎同心。
+- 角色走進湖裡：腳一碰到水冒一圈；涉水時每走 0.75 公尺一圈，在身後連成一串；站著不動就不再冒。角色的環都只有起伏，沒有白色環帶。走到頭沒入水面時一圈，之後在湖底走就沒有了；往回走、頭露出水面時一圈，接著又是涉水的一串；走上岸時一圈。
+- 跑得很快時，身後最舊的幾圈可能比預期早消失：32 格不夠放，最舊的被蓋掉了。
+
+<ex-fig of="water-splash-wading-check" caption="示意：從上方看角色往右涉水，陽光從左邊來。環只有亮暗兩道起伏，沒有白色環帶" />
+
+| 看到的現象 | 原因通常是 | 怎麼修 |
+| --- | --- | --- |
+| 角色走進水裡完全沒有環 | `WaterSplash` 掛在角色的子物件上，那個物件沒有跟著移動 | 掛到會移動的根物件 |
+| 角色站在淺水不動，還是一直冒環 | Bottom、Top 都在水面下或都在水面上，數目在 0、1 或 1、2 之間跳 | 照表重填 Bottom、Top，讓水面落在兩者之間 |
+| 角色在深水裡走也一直冒環 | Top 填得比身高大，頭沒入水面時頂端還在水面上 | Top 填身高 |
+| 方塊浮著時一直冒環 | Bottom、Top 沒照方塊填，水線落在某一端附近，浪一來數目就跳 | 改回 −0.5、0.5 |
+| 從 3 公尺放手，還是只有一圈 | 方塊不是 1 公尺見方，或 `Buoyancy` 的 Water Drag 改大了，頂端沒入不了 | 照 `Buoyancy` 的預設，或放得更高 |
+| 角色的環有白色環帶 | 角色的 Water Splash 的 Foam 還勾著 | 取消勾選 |
+| 涉水的環有白色環帶，角色的 Foam 已取消勾選 | `ImpactRipples.hlsl` 的 `Foam` 那行沒判斷 `impact.w > 0` | 對照最後的版本 |
+| 角色走進水裡、涉水都沒有環，方塊落水照常 | `ImpactRipples.hlsl` 的空格判斷還是 `impact.w <= 0`，負數的事件被當成空格跳過 | 改成 `impact.w == 0` |
+| 角色的環亮暗方向和方塊的相反 | `strength` 沒有取 `abs(impact.w)`，負的強度把沿半徑方向的斜率反過來 | 改成 `abs(impact.w)` |
+| 快跑涉水時，身後最遠的環還沒淡完就突然消失 | 同時活著的事件超過 32 格，最舊的被蓋掉 (每秒的筆數 × 壽命 > 32) | 把角色的 Step Distance 調大，或把 `WaterImpacts.Capacity` 與 `IMPACT_COUNT` 一起調大 |
+
+### 入水那一下太安靜
+
+到這裡，該起漣漪的時候都有漣漪了。但從水面上方掉進水裡的那一刻，環從一個點開始慢慢長大，入水的瞬間看起來很輕：真的東西砸進水裡，會先濺起一撮水花。水花是飛在空中的一顆顆水滴，不在水面上，水面 shader 畫不出來，所以最後一步用 Particle System 在入水處噴一撮。
+
+## 第五步：入水時噴水花
+
+### Particle System：一次噴出一批小方片
+
+**[[Particle System]] 是 Unity 內建的元件，負責放出很多個小圖形 (particle)，每一個依自己的初速、重力、壽命飛行，時間到了就消失。這一步在 Scene 裡放一個水花用的 Particle System，平常不放任何 particle；`WaterSplash` 偵測到從水面上方落水 (數目從 0 變多) 時，把它移到入水處，一次噴出一批，強度越大噴越多。**
+
+一次噴出一批用 `Emit`：
+
+```csharp ParticleSystem.Emit()
+public void Emit(int count);
+```
+
+立刻放出 `count` 個 particle，出發位置、方向、初速照這個 Particle System 自己的設定 (下表的 Shape、Main)。
+
+Particle System 把 particle 放在世界座標裡飛 (Simulation Space 選 World)，所以已經噴出去的水花不會因為 Particle System 被移到別處而跟著跑。這樣整個 Scene 只要一個水花的 Particle System：方塊和角色的 `WaterSplash` 都用它，哪裡落水就移到哪裡噴。
+
+### 建立水花
+
+1. 建立材質
+
+   在 `Assets/LakeDemo/Materials/` 建立 Material `M_Splash`，Shader 選 **Universal Render Pipeline/Particles/Unlit**，Surface Type 選 **Opaque**，Base Map 不指定貼圖 (這個 shader 預設用一張純白的貼圖)，旁邊的色塊選白色，所以每個 particle 是一片純白的方形，和白色環帶一樣是 low poly 的畫法。
+
+2. 建立 Particle System
+
+   Hierarchy 右鍵 > Effects > **Particle System**，改名為 `Splash`，放在 Scene 最上層 (不放在方塊或角色底下)。從這個選單建立的 Particle System，Rotation 已經是 (−90, 0, 0)，發射的方向朝上。
+
+3. 照表設定
+
+   Inspector 裡每個模組是一個可以展開的區塊，標題列前面的勾選框決定這個模組有沒有作用。數值欄右邊的小箭頭可以改成 **Random Between Two Constants**，填兩個數，每個 particle 在兩者之間隨機取。
+
+   | 模組 | 欄位 | 值 | 為什麼 |
+   | --- | --- | --- | --- |
+   | 最上面的主模組 (標題是 `Splash`) | Looping、Play On Awake | 勾選 | 讓它一直在播：官方沒寫停著的 Particle System 呼叫 `Emit` 會怎樣，保持在播最保險 |
+   | | Start Lifetime | 0.6 | 0.6 秒後消失 |
+   | | Start Speed | Random Between Two Constants：2、4 | 往上 2 \~ 4 公尺 / 秒，最高飛到約 0.2 \~ 0.8 公尺 |
+   | | Start Size | Random Between Two Constants：0.04、0.1 | 4 \~ 10 公分的小方片 |
+   | | Gravity Modifier | 1 | 受重力落回水面 |
+   | | Simulation Space | **World** | 移動 `Splash` 時，已經噴出去的不跟著走 |
+   | Emission | Rate over Time | 0 | 自己不放，只在 `Emit` 時放 |
+   | Shape | Shape、Angle、Radius | Cone、20、0.1 | 從半徑 10 公分的圓往上、往外 20 度內噴出 |
+   | Size over Lifetime | (勾選模組) Size | 曲線選由 1 降到 0 的那一條 | 越飛越小，消失時不會突然不見 |
+   | Renderer | Material | `M_Splash` | |
+
+   最高飛多高：往上的速度 2 公尺 / 秒時是 $2^2 / (2 \times 9.81) \approx 0.2$ 公尺，4 公尺 / 秒時約 0.8 公尺。飛上去再落回出發的高度要 $2 \times 2 / 9.81 \approx 0.4$ 秒到 $2 \times 4 / 9.81 \approx 0.8$ 秒，所以 0.6 秒的壽命讓慢的落回水面、快的在落下途中縮小消失。
+
+### WaterSplash.cs：最後的版本
+
+和第二版比，加了 `Splash` 區的兩個欄位、在數目從 0 變多時呼叫 `Splash`，和 `Splash` 方法本身：
+
+```csharp Assets/Water/Scripts/WaterSplash.cs WaterSplash (最後的版本，只列和第二版不同的部分)
+// 掛在會穿過水面的物體上 (方塊、你的角色、丟進湖裡的石頭)，在這些時候新增入水事件 (WaterImpacts.Add)：
+//   底端或頂端穿過水面 (落水、整個沉下去、浮上來、離開水面)：強度看上下的速度，foam 決定有沒有白色環帶；從水面上方落水時再噴一次水花。
+//   水面在底端與頂端之間 (半泡在水裡) 時：水平每移動 stepDistance 新增一筆，只有起伏、沒有白色環帶。
+// 底端、頂端是物體的位置往上幾公尺 (world Y)，不跟著物體旋轉。
+public class WaterSplash : MonoBehaviour
+{
+    …
+    [Header("Splash")]
+    [SerializeField] ParticleSystem splash;          // 噴水花的 Particle System；空的就不噴
+    [SerializeField] int splashParticles = 30;       // 強度 1 時噴幾顆
+    …
+    void Update()
+    {
+        …
+        if (below != endsBelow)
+        {
+            float strength = Mathf.Lerp(minStrength, 1f, VerticalSpeed(position) / fullStrengthSpeed);
+            WaterImpacts.Add(point, strength, foam);
+            if (endsBelow == 0)
+            {
+                Splash(point, strength);
+            }
+            moved = 0f;
+        }
+        …
+    }
+    …
+    // 把 Particle System 移到入水的地方，一次噴出一批；強度越大噴越多。
+    void Splash(Vector3 point, float strength)
+    {
+        if (splash == null)
+        {
+            return;
+        }
+        splash.transform.position = point;
+        splash.Emit(Mathf.RoundToInt(splashParticles * strength));
+    }
+}
+```
+
+- `endsBelow == 0` 是上一格還整個在水面上，所以只有從水面上方落水時噴；整個沉下去 (1 → 2)、浮上來 (2 → 1)、涉水的每一步都不噴。
+- 噴在 `point`，也就是入水處的水面高度。
+- `Mathf.RoundToInt` 取最接近的整數 (剛好在 .5 時取偶數，例如 10.5 得 10)：強度 1 噴 30 顆，方塊從 1 公尺落水的 0.92 噴 28 顆，走進水裡的最小強度 0.3 噴 9 顆。
+- 檔案開頭的註解也補上「從水面上方落水時再噴一次水花」。
+
+### 放進 Scene
+
+選取方塊，把 Hierarchy 裡的 `Splash` 拖進 `WaterSplash` 的 **Splash** 欄位；角色的 `WaterSplash` 也拖同一個。
+
+### 現在應該看到
+
+- 方塊落水的瞬間，噴起一撮約 28 個白色小方片，往上飛半公尺上下、往外散開，0.6 秒內縮小消失；同時落水處開始冒出環。
+- 角色從岸上走進水裡：腳碰到水時噴一小撮 (約 9 顆)；角色能跳的話，跳進水裡噴得多。
+- 涉水的每一步、角色的頭沒入或露出水面、方塊被移回空中：只有環，沒有水花。
+- 剛噴出的水花還在空中時，另一處又落水：前一撮照樣在原處落下，新的一撮在新的地方噴出。
+
+<ex-fig of="splash-particles-check" caption="示意：從側面看落水處，落水 0.3 秒後" />
+
+| 看到的現象 | 原因通常是 | 怎麼修 |
+| --- | --- | --- |
+| Play 一開始，`Splash` 的位置就一直冒白色方塊 | Emission 的 Rate over Time 不是 0 | 改成 0 |
+| 水花往下或往旁邊噴 | `Splash` 的 Rotation 不是 (−90, 0, 0) | 改成 (−90, 0, 0) |
+| 水花是洋紅色 | Renderer 的 Material 沒換成 `M_Splash`，或 `M_Splash` 的 Shader 不是 URP 的 | Material 指派 `M_Splash`，Shader 選 Universal Render Pipeline/Particles/Unlit |
+| 水花跟著下一次落水跳到新的地方 | Simulation Space 是 Local | 改成 World |
+| 水花一直往上飛、不落下 | Gravity Modifier 是 0 | 改成 1 |
+| 落水沒有水花，環照樣有 | Splash 欄位是空的 | 把 `Splash` 拖進去 |
+
+## 回頭看
+
+### 接回開頭的問題
+
+開頭的問題是：方塊掉進水裡，水面卻沒反應。一路下來：
+
+| 步驟 | 解決的 | 留下的東西 |
+| --- | --- | --- |
+| [第一步](#第一步：記下入水事件) | shader 不知道哪裡有東西落水 | `WaterImpacts`：32 格 ring buffer 存 (位置, 時間, 強度)，`SetGlobalVectorArray` 寫成全域 `_WaterImpacts`；每次進入 Play 清空 |
+| [第二步](#第二步：畫出擴散、淡掉的白色環帶) | 水面上看不到事件 | `ImpactRipples.hlsl`：$\delta_{\text{ring}} = r_{\text{imp}} - v_{\text{rip}}\,a_{\text{imp}}$、$q_{\text{ring}} = q_{\text{imp}}(1 - a_{\text{imp}}/T_{\text{life}})$，硬邊的白色環帶併進泡沫遮罩 $f' = \max(f,\ f_{\text{imp}})$ |
+| [第三步](#第三步：讓環成為水面的起伏) | 白色環帶像畫上去的 | 沿半徑方向的斜率 $h'_{\text{ring}} = -q_{\text{ring}}\,s_{\text{ring}}\sin(\pi\delta_{\text{ring}}/W_{\text{ring}})$ → $\nabla h$ → $\mathbf{n}_{\text{imp}}$，Normal Blend 疊上細波紋，接 Normal block、折射與 Fresnel；參數在 `SO_LakeWater` |
+| [第四步](#第四步：沉下去、浮上來、走過水面) | 只有落水那一下 | `WaterSplash` 數幾端在水面下：數目一變就記一筆，強度看上下的速度；半泡時水平每 0.75 公尺一筆。涉水的事件，和 Foam 取消勾選的物體 (角色) 穿過水面的事件，強度存成負數，shader 只替正的畫白色環帶 |
+| [第五步](#第五步：入水時噴水花) | 入水太安靜 | 一個 World 空間的 Particle System，從水面上方落水時移過去 `Emit` |
+
+水面能起漣漪，靠的是把「哪裡、什麼時候、多強」交給 shader：C# 只在穿過水面的那一格寫一次，之後環的大小、淡掉的程度、高度的 gradient 與白色環帶，全部由每個像素用 `_WaterTime` 自己算出來；改的只有 normal 和泡沫遮罩，所以光影、反射、折射都跟著環走，mesh 與浮力不受影響。
+
+### 檢查點：入水的漣漪與水花
+
+做對時你會看到：
+
+- 按 Play：方塊落水的瞬間噴起一撮白色小方片；落水處冒出一圈有起伏的環，沿著中線是白色環帶，2.5 秒內擴散到約 2 公尺、越來越淡後消失。把方塊的 Position Y 改回放手時的高度，可以再看一次。
+- 環經過的地方，太陽的反光與天空的倒影被推開、彎成弧，水下的湖底跟著晃。
+- 角色走進湖裡：腳碰到水時噴一小撮水花、冒一圈；涉水時身後連成一串環，站著不動就停；走到頭沒入水面時一圈，之後不再冒；往回走、頭露出水面時再一圈。角色的環都只有起伏，沒有白色環帶。
+- 第二次按 Play，水面上不會出現上一次 Play 留下的環。
+- 調效果用 Scene 視窗；最後用角色的攝影機在 Game 視窗確認一次。
+
+<ex-fig of="impact-ripples-overall-check" caption="示意：從上方看。左兩張是預期，右兩張是最常見的兩種錯誤" />
+
+| 看到的現象 | 原因通常是 | 回到哪一步 |
+| --- | --- | --- |
+| 落水完全沒有環 | 方塊沒有 `WaterSplash`，或 Custom Function 沒接進泡沫遮罩 | [第一步](#第一步：記下入水事件)、[第二步](#第二步：畫出擴散、淡掉的白色環帶) |
+| 白色環帶不長大或不消失 | `ImpactRipple` 的速度或壽命不對 | [第二步](#第二步：畫出擴散、淡掉的白色環帶)、[第三步](#第三步：讓環成為水面的起伏) |
+| 只有白色環帶、沒有起伏 | Normal Blend 沒接到 Normal block | [第三步](#第三步：讓環成為水面的起伏) |
+| 細波紋不見了 | Normal Blend 的 A 沒接細波紋 | [第三步](#第三步：讓環成為水面的起伏) |
+| 頭沒入、露出水面或涉水時沒有環 | `WaterSplash` 還是第一版，Bottom、Top 填錯，或 `ImpactRipples.hlsl` 的空格判斷還是 `impact.w <= 0` | [第四步](#第四步：沉下去、浮上來、走過水面) |
+| 角色的環有白色環帶 | 角色的 Water Splash 的 Foam 還勾著，或 `ImpactRipples.hlsl` 的 `Foam` 那行沒判斷 `impact.w > 0` | [第四步](#第四步：沉下去、浮上來、走過水面) |
+| 落水沒有水花 | Splash 欄位是空的，或 Rate over Time 不是 0 | [第五步](#第五步：入水時噴水花) |
+| 第二次按 Play，上一次落水的地方又冒出環 | `WaterImpacts` 的 `Clear` 沒有執行 (少了 `RuntimeInitializeOnLoadMethod` 那一行) | [第一步](#第一步：記下入水事件) |
+
+**對應 Final Demo**：「角色或物體穿過水面時產生水花或漣漪」完成；「浮標入水時產生漣漪」的機制在這一章完成，浮標掛上 `WaterSplash` 見[「掛到浮標上」](#掛到浮標上)。
+
+此時你的專案裡，以下檔案應該和教材 GitHub repo 的[範例程式碼](https://github.com/RogelioKG/explain-waterbody/tree/main/urp-water/unity)相同：
+
+- `Assets/Water/Scripts/WaterImpacts.cs`、`WaterSplash.cs` (這一章新增)
+- `Assets/Water/Shaders/ImpactRipples.hlsl` (這一章新增)
+- `Assets/Water/Scripts/WaterSettings.cs`、`WaterBody.cs` (這一章新增了入水漣漪的參數)
+- `Assets/Water/Scripts/Buoyancy.cs`、`WaterMesh.cs`、`WaterHeightProbe.cs` (這一章沒有改它們)
+- `Assets/Water/Shaders/GerstnerWaves.hlsl` (這一章沒有改它)
+
+`SG_Water.shadergraph`、`SO_LakeWater`、`M_Splash` 與 Scene 裡的 `Splash` 不在 repo 裡，以這一章的 node 表與設定表為準。
+
+### 下一步
+
+- 下一章 [Underwater Fog and Visibility](underwater-fog.html)：潛進水裡時，畫面換成水下的色調與距離霧。
+
+### 請回報
+
+以下是官方文件沒有寫清楚、需要你在 Unity 裡看一眼的事：
+
+| # | 去哪裡看 | 回報什麼 |
+| --- | --- | --- |
+| 1 | 每一步改完程式或 graph 後的 Console | 有沒有紅字或黃字，有的話第一行是什麼 |
+| 2 | [第一步](#第一步：記下入水事件)：Play 中改方塊的 Position Y | 方塊是不是從新的高度重新落下，落下的樣子和剛按 Play 時一樣 |
+| 3 | [第二步](#第二步：畫出擴散、淡掉的白色環帶)：Custom Function node | 在 HLSL 檔裡宣告全域陣列後，node 與 graph 的預覽有沒有錯誤標記 |
+| 4 | [第二步](#第二步：畫出擴散、淡掉的白色環帶)：方塊落水 | 白色環帶有沒有出現、大約多久消失；站在岸邊看起來多粗，快消失時是否斷斷續續 |
+| 5 | [第三步](#第三步：讓環成為水面的起伏)：面向太陽看環 | 起伏看不看得出來、亮暗方向是否面向太陽的一側亮 |
+| 6 | [第四步](#第四步：沉下去、浮上來、走過水面)：方塊從 1 公尺與 3 公尺放手 | 各冒幾圈；3 公尺時頂端有沒有沒入、三圈分不分得出來 |
+| 7 | [第四步](#第四步：沉下去、浮上來、走過水面)：角色涉水、走到頭沒入水面再走回來 | 環的間隔與密度；站著不動時會不會冒環；頭沒入、露出水面時各有沒有一圈；Foam 取消勾選後角色的環是否都沒有白色環帶，涉水那一串在低角度的陽光下看不看得出來；你的角色用的是 CharacterController、Rigidbody 還是別的 |
+| 8 | [第五步](#第五步：入水時噴水花)：`M_Splash` 與 `Splash` 的 Inspector | `M_Splash` 的 Surface Type 預設值；Random Between Two Constants 從哪裡切換；Size over Lifetime 的曲線預設選項裡有沒有由 1 降到 0 的那一條 |
+| 9 | [第五步](#第五步：入水時噴水花)：方塊落水 | 水花有沒有噴出；是不是在這一次落水的位置噴出 (不是上一次的位置) |
+| 10 | 第二次按 Play | 水面上有沒有出現上一次 Play 的環 |
+
+## 變化與延伸
+
+### 效能
+
+水面上的每個像素都跑一次 32 圈的迴圈，空格與過期的事件也要讀一次再跳過。官方沒有給這種寫法的成本數字；畫面變慢時，先把 `WaterImpacts.Capacity` 與 `IMPACT_COUNT` 一起改小 (兩者必須相同)，或縮短壽命讓同時活著的事件變少。
+
+### 掛到浮標上
+
+做完 [Fishing Bobber](fishing-bobber.html) 的浮標，不必改任何程式就能起漣漪：選取 `Bobber`，**Add Component** > **Water Splash**，照下表填，Splash 欄位拖進 `Splash`。浮標是高 0.5 公尺、原點在正中央的 Capsule，所以底端、頂端各離中心 0.25 公尺。
+
+| 欄位 | 值 |
+| --- | --- |
+| Bottom | −0.25 |
+| Top | 0.25 |
+| 其他 | 預設 (Foam 勾選) |
+
+照[「數一數有幾端在水面下」](#數一數有幾端在水面下)的規則，浮標會在這些時候冒環：
+
+| 情形 | 數目的變化 | 上下的速度 | $q_{\text{imp}}$ |
+| --- | --- | --- | --- |
+| 拋出去落水 (另噴水花) | 0 → 1 或 2 | $\sqrt{4^2 + 2 \times 9.81 \times 2.75} \approx 8.4$ | 1 |
+| 咬鉤，整根被拉進水裡 | 1 → 2 | 約 0.74 | 約 0.40 |
+| 魚跑掉，浮上來 | 2 → 1 | 約 1.2 | 約 0.47 |
+| 收線時被拖著走 | 停在 1 | | 每 0.75 公尺一筆 0.4，只有起伏 |
+| 收回竿尖 | 1 → 0 | | |
+
+落水的速度用拋竿的數字：往上 4 公尺 / 秒、中心從水面上 2.75 公尺出發 ([Fishing Bobber「拋出去」](fishing-bobber.html#拋出去：直接設定速度))。落水後浮標往下鑽到頂端也沒入、約 1 秒後浮上來，所以落水處還會再多兩圈 (1 → 2、2 → 1)，和落水那圈幾乎重疊。被魚輕點時，頂端從露出 0.25 公尺降到 0.10 公尺 ([Fishing Bobber「魚的拉力」](fishing-bobber.html#魚的拉力：浮標重量的幾倍))，數目沒變，所以不記。想讓每一下試咬都冒一圈小的，在 `FishingRod` 進入 `Nibbling` 時加一行 `WaterImpacts.Add(bobber.position, 0.3f)`；不要白色環帶就再傳第三個參數 `false`。任何程式都可以這樣自己新增事件，例如魚躍出水面的時候。
+
+### 一次好幾圈
+
+真的石頭落水會激起好幾圈同心的環。在 $h_{\text{ring}}$ 的隆起裡再乘上一個沿 $\delta_{\text{ring}}$ 振盪的 cosine，並把 $W_{\text{ring}}$ 加大，就變成一個事件好幾圈；沿半徑方向的斜率要照乘積的微分重新推。
+
+## 來源
+
+### 官方文件
+
+縮寫：`SR` = `https://docs.unity.com/en-us/engine/6000.3/script-reference/unityengine`，`SG` = `https://docs.unity3d.com/Packages/com.unity.shadergraph@17.3/manual`，`URP` = `https://docs.unity3d.com/Packages/com.unity.render-pipelines.universal@17.3/manual`。
+
+- `Shader.SetGlobalVectorArray` (Material 沒有同名的值時，shader 才用全域的值)：`SR/shader/setglobalvectorarray`；陣列長度在第一次寫入時固定 (寫在 `Material.SetVectorArray`，全域陣列的頁面沒寫)：`SR/material/setvectorarray`
+- `RuntimeInitializeOnLoadMethodAttribute` 與 `RuntimeInitializeLoadType.BeforeSceneLoad` (載入第一個 Scene 的物件後、Awake 之前呼叫)：`SR/runtimeinitializeonloadmethodattribute`、`SR/runtimeinitializeloadtype`
+- `ParticleSystem.Emit` (立刻放出指定數量的 particle)：`SR/particlesystem/emit`；Particle System 的模組，都在 `https://docs.unity.com/en-us/engine/6000.3/manual/visual-effects/particle-systems/particle-system-modules/` 底下：Main `part-sys-main-module`、Emission `part-sys-emission-module`、Shape `part-sys-shape-module`、Size over Lifetime `part-sys-size-over-life-module`、Renderer `part-sys-renderer-module`
+- GameObject > Effects > Particle System 建立時 Rotation 設成 (−90, 0, 0)：UnityCsReference (分支 6000.3) 的 `Editor/Mono/Commands/GOCreationCommands.cs`
+- URP 的 Particles Unlit shader：`URP/particles-unlit-shader.html`；Base Map 預設是白色貼圖：Unity-Technologies/Graphics (分支 6000.3/staging) 的 `Packages/com.unity.render-pipelines.universal/Shaders/Particles/ParticlesUnlit.shader`
+- Custom Function node：`SG/Custom-Function-Node.html`；Maximum node：`SG/Maximum-Node.html`；Normal Blend node：`SG/Normal-Blend-Node.html`
+- HLSL 的 `step` (x ≥ y 時回傳 1)、`length`、`abs`：https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/dx-graphics-hlsl-step 、https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/dx-graphics-hlsl-length 、https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/dx-graphics-hlsl-abs
+- `Mathf.Lerp` (t 夾在 0 到 1)：`SR/mathf/lerp`；`Mathf.RoundToInt` (剛好 .5 時取偶數)：`SR/mathf/roundtoint`
+
+### 數字
+
+- 中線的半徑、強度、白色環帶的寬度、沿半徑方向的斜率、圓丘高度、第三步的 normal 例子、水花的飛行高度與時間：直接計算
+- 方塊落水的速度 (底面離水面 1 公尺放手)：自由落體直接計算
+- 方塊最深時頂面的位置 (1 公尺放手時露出約 8 公分、3 公尺放手時在水面下約 19 公分)、3 公尺放手時頂端沒入的速度 (約 3.4 公尺 / 秒) 與浮上來時的速度 (約 1.1 公尺 / 秒)：用 `Buoyancy` 的算法 (Buoyancy Ratio 2、Water Drag 8、柱高 1，四個浮點一樣深) 在 Python 裡做一維模擬 (只算上下、每步 0.02 秒、水面靜止)。「碰上浪時頂端偶爾也沒入」：把四道預設的波在方塊位置的起伏近似成四個 cosine 相加，隨機相位跑 2000 次，1 公尺放手時約三成頂端會沒入。都沒有在 Unity 裡實際跑過，實際數字可能有出入 (見「請回報」)
+- [「掛到浮標上」](#掛到浮標上)的數字：落水的速度用 Fishing Bobber 的拋竿數字直接計算；拉沉、浮上來的速度用 `Buoyancy` 的算法 (Buoyancy Ratio 2、Water Drag 8、柱高 0.5) 與 Bite Pull 1.2 做同樣的一維模擬
+</script>
+<script>
+explainer({
+  title: 'Interactive Ripples',
+  assumes: ['Unity 編輯器的基本操作 (看完 Unity Learn 的 Basic 與 Creative Core)', 'C# 基礎', { t: 'Shader Graph (Custom Function)', href: 'shader-graph.html' }, { t: 'Flow Normals (細波紋的 normal、Normal Blend)', href: 'flow-normals.html' }, { t: 'Reflection (泡沫遮罩 f、SSG_Refraction_UV 與 SSG_Fresnel 的接法)', href: 'reflection.html' }, { t: 'Wave Height Query (WaterBody.TryFind、GetSurfaceHeight)', href: 'wave-height-query.html' }, { t: 'Buoyancy (湖上的方塊、Rigidbody)', href: 'buoyancy.html' }, { t: 'URP Waterbody (總覽)', href: 'urp-water.html' }],
+  approach: '重新發明：從「方塊掉進水裡，水面卻沒反應」出發，先在 C# 記下入水事件交給 shader，再依序畫出擴散的白色環帶、讓環改 normal 成為起伏、讓更多種穿過水面的方式記事件，最後加上水花',
+  env: 'Windows 11、Unity 6000.3.20f1 (英文介面)、URP 17.3',
+  terms: {
+    '入水事件': '一筆「哪裡、什麼時候、多強」的紀錄：東西穿過水面時 C# 記下，水面 shader 依它畫出一圈漣漪',
+    'ring buffer': '固定格數的陣列輪流寫：寫到最後一格再回到第一格，蓋掉最舊的資料',
+    'Particle System': 'Unity 內建的元件，放出很多個小圖形 (particle)，每一個依初速、重力、壽命各自飛行，時間到了消失',
+  },
+});
+</script>
+</body>
+</html>

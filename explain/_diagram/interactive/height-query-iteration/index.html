@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fixed-point iteration：每猜一次，落點離目標更近</title>
+<link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <header class="top">
+    <p class="concl">每猜一次，<span class="k-guess">落點</span>離<span class="k-q">目標</span>更近</p>
+  </header>
+  <main class="stage card">
+    <div class="plot" id="plot">
+      <svg id="sv" role="img" aria-label="單一個 Gerstner 波的剖面 (陡度 0.5、波長 6 m、t = 0，水平與垂直同比例)：虛線是靜水面，猜測 p 是靜水面上的 vertex，箭頭指向它被推到的落點；目標點 q 是一條直線，可以左右拖動"></svg>
+    </div>
+    <div class="errs-wrap">
+      <p class="cap errs-cap"><span class="k-guess">落點</span>偏了多少 (m)</p>
+      <ol class="errs" id="errs" aria-label="每一次猜測的落點偏了多少"></ol>
+    </div>
+  </main>
+  <p class="say" id="say" aria-live="polite"><span class="f num" id="sayF"></span><span class="s" id="sayS"></span></p>
+  <section class="ctl card" aria-label="控制">
+    <div class="nav">
+      <button id="reset" type="button">重來</button>
+      <button id="prev" type="button" aria-label="上一次">‹</button>
+      <span class="stepno" id="stepno"></span>
+      <button id="next" type="button" aria-label="下一次">›</button>
+    </div>
+    <div class="qctl">
+      <label class="name" for="q"><span class="dot" style="--tone: var(--q)"></span>目標點 q</label>
+      <input id="q" type="range" min="0" max="4.5" step="0.01" value="1" style="--tone: var(--q)">
+      <output id="qv" for="q"></output>
+    </div>
+  </section>
+  <script src="./script.js"></script>
+</body>
+</html>

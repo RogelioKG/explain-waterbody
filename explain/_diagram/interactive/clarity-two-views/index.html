@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>同一個清澈度：岸上見底、水下見魚</title>
+<link rel="stylesheet" href="./style.css">
+</head>
+<body>
+<header class="head">
+  <h1>清澈度的兩個視角</h1>
+  <p class="concl">一個<b class="t-dist">清澈度</b>，水上見底、水下見<b class="t-fish">魚</b></p>
+</header>
+
+<section class="ctrl card" aria-label="參數">
+  <label class="ctl" for="clarity"><i class="dot k-dist"></i><span>清澈度 D</span><output id="o-d" for="clarity">5.0 m</output></label>
+  <input id="clarity" class="k-dist" type="range" min="1" max="20" step="0.5" value="5" aria-label="清澈度 D (公尺)">
+  <p class="cap">D = 透光剩 1% 的距離</p>
+</section>
+
+<main class="stage card">
+  <div class="plot" id="plot">
+    <canvas id="cv" role="img" aria-label="岸上剖面與水下視角"></canvas>
+    <span class="view-t" id="t-top" data-overlay><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 6.5C3.5 3.5 12.5 3.5 14.5 6.5C12.5 9.5 3.5 9.5 1.5 6.5Z"/><circle cx="8" cy="7.6" r="1.9"/><path d="M8 11v3.5M6 12.6l2 2 2-2"/></svg>岸上往下看</span>
+    <span class="view-t" id="t-bot" data-overlay><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 8C3.5 5 12.5 5 14.5 8C12.5 11 3.5 11 1.5 8Z"/><circle cx="9.2" cy="8" r="1.9"/></svg>水下平視</span>
+    <span class="pill k-dist" id="p-h" data-overlay>h = D · 見不到底</span>
+    <span class="pill k-dist" id="p-d" data-overlay>d = D · 見不到魚</span>
+    <span class="pill k-water" id="p-w1" data-overlay><i class="dot"></i>只剩水色</span>
+    <span class="pill k-water" id="p-w2" data-overlay><i class="dot"></i>只剩水色</span>
+    <span class="axis-t" id="axis-t" data-overlay>光在水裡走的距離 (m)</span>
+    <div id="ticks"></div>
+    <div id="fish-tags"></div>
+  </div>
+</main>
+
+<script src="./script.js"></script>
+</body>
+</html>
